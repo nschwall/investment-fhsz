@@ -5,7 +5,7 @@
 #
 # Purpose:   Explore Owner Transfer Source Files (September 2025 Transfer)
 # Author:    Nora Schwaller
-# Assisted:  Claude Sonnet 4.6 (Anthropic), claude.ai, 2025-03-10
+# Assisted:  Claude Sonnet 4.6 (Anthropic), claude.ai, 2025-03-12
 # Started:   MM/DD/YYYY
 # Updated:   MM/DD/YYYY
 # **************************************************
@@ -36,7 +36,7 @@ cat("====================================================\n\n")
 set.seed(123)
 
 # load packages
-pkgs <- c("dplyr", "readxl", "lubridate")
+pkgs <- c("dplyr", "data.table", "lubridate", "R.utils")
 invisible(lapply(pkgs, function(p) {
   if (!require(p, character.only = TRUE)) {
     install.packages(p)
@@ -54,32 +54,34 @@ ts <- function(label = "") {
 if (!dir.exists(sample_out_dir)) dir.create(sample_out_dir, recursive = TRUE)
 
 # *****************************************************
-# 2. Discover Excel files ----
+# 2. Discover CSV files ----
 # *****************************************************
-ts("Scanning for Excel files...")
+ts("Scanning for CSV files...")
 
-skip_dirs  <- c("Zip Folders", "Meta Data")
-subdirs    <- list.dirs(transfer_root, full.names = TRUE, recursive = FALSE)
-subdirs    <- subdirs[!basename(subdirs) %in% skip_dirs]
+skip_dirs <- c("Zip Folders", "Meta Data")
+subdirs   <- list.dirs(transfer_root, full.names = TRUE, recursive = FALSE)
+subdirs   <- subdirs[!basename(subdirs) %in% skip_dirs]
 
 cat("Subfolders to scan:\n")
 cat(paste0("  ", basename(subdirs), "\n"))
 
-excel_files <- unlist(lapply(subdirs, function(d) {
-  list.files(d, pattern = "\\.(xlsx|xls)$", full.names = TRUE,
-             recursive = TRUE, ignore.case = TRUE)
+csv_files <- unlist(lapply(subdirs, function(d) {
+  list.files(d, pattern = "^UNIVERSITY_OF_CALIFORNIA.*\\.csv$",
+             full.names = TRUE, recursive = TRUE, ignore.case = TRUE)
 }))
 
-cat(sprintf("\nFound %d Excel file(s):\n", length(excel_files)))
-cat(paste0("  ", basename(excel_files), "\n"))
+cat(sprintf("\nFound %d CSV file(s):\n", length(csv_files)))
+cat(paste0("  ", basename(csv_files), "\n"))
 
-if (length(excel_files) == 0) stop("No Excel files found — check path.")
+if (length(csv_files) == 0) stop("No matching CSV files found — check path.")
 
 # *****************************************************
 # 3. Loop over each file ----
 # *****************************************************
 
-for (f in excel_files) {
+n_edge <- 5000L  # rows to pull from each end
+
+for (f in csv_files) {
   
   file_base <- tools::file_path_sans_ext(basename(f))
   
@@ -88,33 +90,58 @@ for (f in excel_files) {
   ts(paste("FILE:", basename(f)))
   cat(strrep("=", 70), "\n")
   
-  # --- 3a. Load ----
-  ts("  Loading...")
-  sheets <- readxl::excel_sheets(f)
+  # --- 3a. Row count (cheap) ----
+  ts("  Counting rows...")
+  n_total <- R.utils::countLines(f) - 1L  # subtract header
+  cat(sprintf("  Total rows (excl. header): %s\n",
+              formatC(n_total, format = "d", big.mark = ",")))
   
-  if (length(sheets) > 1) {
-    warning("Multiple sheets found in ", basename(f), ": ",
-            paste(sheets, collapse = ", "), " — reading sheet 1 only.")
+  # --- 3b. Load first + last N rows ----
+  ts(sprintf("  Loading first and last %s rows...",
+             formatC(n_edge, format = "d", big.mark = ",")))
+  
+  df_head <- as.data.frame(data.table::fread(
+    f, nrows = n_edge,
+    na.strings = c("", "NA", "N/A", "null"),
+    showProgress = FALSE
+  ))
+  
+  if (n_total > n_edge) {
+    df_tail <- as.data.frame(data.table::fread(
+      f, skip = n_total - n_edge,
+      na.strings = c("", "NA", "N/A", "null"),
+      showProgress = FALSE,
+      col.names = names(df_head)
+    ))
+    df <- rbind(df_head, df_tail)
+    rm(df_head, df_tail)
+    cat(sprintf("  Loaded %s rows (%s head + %s tail) of %s total\n",
+                formatC(nrow(df), format = "d", big.mark = ","),
+                formatC(n_edge,   format = "d", big.mark = ","),
+                formatC(n_edge,   format = "d", big.mark = ","),
+                formatC(n_total,  format = "d", big.mark = ",")))
+  } else {
+    df <- df_head
+    rm(df_head)
+    cat(sprintf("  File has <= %s rows — loaded all %s\n",
+                formatC(n_edge,   format = "d", big.mark = ","),
+                formatC(nrow(df), format = "d", big.mark = ",")))
   }
   
-  cat(sprintf("  Sheet(s) found: %s\n", paste(sheets, collapse = ", ")))
+  cat(sprintf("  Columns: %d\n", ncol(df)))
   
-  df <- as.data.frame(readxl::read_excel(f, sheet = 1, guess_max = 10000))
-  
-  cat(sprintf("  Dimensions: %d rows x %d columns\n", nrow(df), ncol(df)))
-  
-  # --- 3b. Column names ----
+  # --- 3c. Column names ----
   cat("\n--- COLUMN NAMES ---\n")
   print(colnames(df))
   
-  # --- 3c. Head (untruncated) ----
+  # --- 3d. Head (untruncated) ----
   cat("\n--- HEAD (first 6 rows, all columns) ---\n")
   old_width <- getOption("width")
   options(width = 300)
   print(head(df), row.names = FALSE)
   options(width = old_width)
   
-  # --- 3d. Summary stats by type ----
+  # --- 3e. Summary stats by type ----
   ts("  Running summary stats...")
   
   num_cols  <- names(df)[sapply(df, function(x) is.numeric(x) || is.integer(x))]
@@ -163,19 +190,15 @@ for (f in excel_files) {
     }
   }
   
-  # --- 3e. Random 1k subsample & save ----
-  ts("  Saving 1k subsample...")
+  # --- 3f. Save sample & clean up ----
+  ts("  Cleaning up...")
   
-  n_sample  <- min(1000L, nrow(df))
-  df_sample <- df[sample(nrow(df), n_sample), ]
+  # out_path <- file.path(sample_out_dir, paste0("1-00_", file_base, ".rds"))
+  # saveRDS(df, file = out_path)
+  # cat(sprintf("  Saved %s-row sample -> %s\n",
+  #             formatC(nrow(df), format = "d", big.mark = ","), out_path))
   
-  out_path <- file.path(sample_out_dir, paste0("1-00_", file_base, ".rds"))
-  saveRDS(df_sample, file = out_path)
-  cat(sprintf("  Saved %d-row sample -> %s\n", n_sample, out_path))
-  
-  # --- 3f. Clean up ----
-  ts("  Cleaning up memory...")
-  rm(df, df_sample)
+  rm(df)
   gc()
   
   cat(sprintf("\n  Time since start: %.1f min\n",
