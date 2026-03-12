@@ -17,7 +17,7 @@
 # UPDATE THESE PATHS TO YOUR LOCAL MACHINE
 # set user
 user <- "C:/Users/Nora Schwaller/Dropbox (Personal)/"
-root <- paste0(user, "Institutional Investment/")  
+root <- paste0(user, "Fire Investment/")  
 secure <- ("Y:/Institutional Investment/")
 
 # define folders 
