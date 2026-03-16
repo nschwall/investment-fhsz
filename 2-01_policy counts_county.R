@@ -1,4 +1,6 @@
 
+
+
 # **************************************************
 #                     DETAILS
 #
@@ -32,7 +34,7 @@ cat("====================================================\n\n")
 
 set.seed(123)
 
-pkgs <- c("dplyr", "readr", "stringr", "tools")
+pkgs <- c("dplyr", "readr", "stringr", "tools", "tidyr")
 invisible(lapply(pkgs, function(p) {
   if (!require(p, character.only = TRUE)) {
     install.packages(p)
@@ -83,14 +85,14 @@ d2023 <- raw_2023 %>%
     vol_new   = clean_num(vol_new),
     vol_renew = clean_num(vol_renew),
     vol_non   = clean_num(vol_non),
-    fair_new  = clean_num(fair_new),
-    fair_renew = clean_num(fair_renew),
-    did_new   = clean_num(did_new),
-    did_renew = clean_num(did_renew)
+    fair_new   = clean_num(fair_new),
+    fair_renew = clean_num(fair_renew)
   )
 
 cat(sprintf("  After fill: %d rows | years: %s\n",
             nrow(d2023), paste(sort(unique(d2023$year)), collapse = ", ")))
+
+rm(raw_2023)
 
 
 # *****************************************************
@@ -118,20 +120,24 @@ d2021 <- raw_2021 %>%
     vol_non_ii  = clean_num(vol_non_ii),
     vol_non     = vol_non_ci + vol_non_ii,   # combined to match 2020-2023
     fair_new    = clean_num(fair_new),
-    fair_renew  = clean_num(fair_renew),
-    did_new     = NA_real_,                  # not in this file
-    did_renew   = NA_real_
+    fair_renew  = clean_num(fair_renew)
   ) %>%
   select(county, year, vol_new, vol_renew, vol_non, vol_non_ci, vol_non_ii,
-         fair_new, fair_renew, did_new, did_renew)
+         fair_new, fair_renew)
 
 cat(sprintf("  After clean: %d rows | years: %s\n",
             nrow(d2021), paste(sort(unique(d2021$year)), collapse = ", ")))
+
+rm(raw_2021)
 
 
 # *****************************************************
 # 4. Validate: county sums vs. state rows ----
 # *****************************************************
+# Small residual gaps are expected and not a concern. CDI suppresses counts
+# for low-population counties (shown as "-"), which are dropped as NA in
+# county-level sums but included in CDI's own state rollup. Differences are
+# well under 0.1% of state totals across all columns and years.
 
 ts("Validating county sums against state totals...")
 
@@ -152,15 +158,22 @@ check_sums <- function(df, label, cols) {
     s_col <- paste0(col, "_state")
     c_col <- paste0(col, "_sum")
     if (!s_col %in% names(comp)) next
-    diffs <- abs(comp[[s_col]] - comp[[c_col]])
-    cat(sprintf("    %-15s  max_diff = %s  (years checked: %s)\n",
-                col,
-                formatC(max(diffs, na.rm = TRUE), format = "d", big.mark = ","),
-                paste(comp$year, collapse = ", ")))
+    
+    cat(sprintf("    %-15s\n", col))
+    for (i in seq_len(nrow(comp))) {
+      diff <- abs(comp[[s_col]][i] - comp[[c_col]][i])
+      pct  <- 100 * diff / max(comp[[s_col]][i], 1)
+      cat(sprintf("      %d  state = %s  sum = %s  diff = %s (%.3f%%)\n",
+                  comp$year[i],
+                  formatC(comp[[s_col]][i], format = "d", big.mark = ","),
+                  formatC(comp[[c_col]][i], format = "d", big.mark = ","),
+                  formatC(diff,             format = "d", big.mark = ","),
+                  pct))
+    }
   }
 }
 
-check_sums(d2023, "2020-2023", c("vol_new","vol_renew","vol_non","fair_new","fair_renew","did_new","did_renew"))
+check_sums(d2023, "2020-2023", c("vol_new","vol_renew","vol_non","fair_new","fair_renew"))
 check_sums(d2021, "2015-2021", c("vol_new","vol_renew","vol_non","fair_new","fair_renew"))
 
 
@@ -180,10 +193,19 @@ cat(sprintf("  2015-2021 county rows: %d\n", nrow(d2021)))
 # *****************************************************
 # 6. Compare overlapping years (2020 & 2021) ----
 # *****************************************************
+# The two CDI report vintages differ for 2020 and 2021. This is expected:
+# CDI revised its reporting methodology starting with the 2020 report year,
+# removing certain non-renewal and cancellation types, which reduces counts
+# relative to the older file. Differences are real but reflect a reporting
+# change, not data error. We use the 2020-2023 doc for 2020 onward (see
+# Section 7), so the 2019->2020 annual change uses old-doc values for both
+# years and 2020->2021 uses new-doc values for both years -- keeping each
+# change internally consistent. Flag the 2019->2020 transition as a
+# methodology break if publishing year-over-year trends.
 
 ts("Comparing overlapping years (2020, 2021)...")
 
-overlap_cols <- c("vol_new","vol_renew","vol_non","fair_new","fair_renew")
+overlap_cols  <- c("vol_new","vol_renew","vol_non","fair_new","fair_renew")
 overlap_years <- c(2020L, 2021L)
 
 overlap_a <- d2023 %>%
@@ -212,7 +234,6 @@ for (col in overlap_cols) {
     cat(sprintf("    max_abs_diff = %s  |  mean_abs_diff = %.1f\n",
                 formatC(max(abs(diff), na.rm = TRUE), format = "d", big.mark = ","),
                 mean(abs(diff), na.rm = TRUE)))
-    # Show worst offenders
     mismatch <- overlap_comp %>%
       mutate(diff_val = abs(!!sym(a_col) - !!sym(b_col))) %>%
       filter(diff_val > 0) %>%
@@ -227,40 +248,39 @@ for (col in overlap_cols) {
 
 if (!any_diff) cat("\n  All overlapping values match exactly.\n")
 
-# Decision: for overlapping years, prefer 2020-2023 doc values
-# (more recent report; drop overlap years from 2015-2021 before appending)
 cat("\n  -> Using 2020-2023 doc values for years 2020 and 2021.\n")
+
+rm(overlap_a, overlap_b, overlap_comp, any_diff)
 
 
 # *****************************************************
 # 7. Append into single panel ----
 # *****************************************************
+# 2015-2019: old doc only (d2021_trim)
+# 2020-2023: new doc only (d2023)
+# Annual changes across the 2019->2020 boundary mix doc vintages -- flag
+# as a methodology break for published trend analysis (see Section 6 note).
 
 ts("Appending into single panel (2015-2023)...")
 
-# Drop overlap years from older file before binding
 d2021_trim <- d2021 %>% filter(!year %in% overlap_years)
-
-# -- Optional: keep vol_non_ci and vol_non_ii in the panel
-# To include them, uncomment the block below and comment out the version above it.
-# Note: vol_non_ci / vol_non_ii are NA for 2020-2023 (not reported separately).
 
 # OPTION A (default): vol_non only
 panel <- bind_rows(
   d2023 %>% select(county, year, vol_new, vol_renew, vol_non,
-                   fair_new, fair_renew, did_new, did_renew),
+                   fair_new, fair_renew),
   d2021_trim %>% select(county, year, vol_new, vol_renew, vol_non,
-                        fair_new, fair_renew, did_new, did_renew)
+                        fair_new, fair_renew)
 ) %>% arrange(county, year)
 
 # OPTION B (commented out): include vol_non_ci and vol_non_ii
 # panel <- bind_rows(
 #   d2023 %>% mutate(vol_non_ci = NA_real_, vol_non_ii = NA_real_) %>%
 #     select(county, year, vol_new, vol_renew, vol_non, vol_non_ci, vol_non_ii,
-#            fair_new, fair_renew, did_new, did_renew),
+#            fair_new, fair_renew),
 #   d2021_trim %>%
 #     select(county, year, vol_new, vol_renew, vol_non, vol_non_ci, vol_non_ii,
-#            fair_new, fair_renew, did_new, did_renew)
+#            fair_new, fair_renew)
 # ) %>% arrange(county, year)
 
 cat(sprintf("  Panel rows: %d | counties: %d | years: %s\n",
@@ -289,12 +309,62 @@ panel %>%
 # *****************************************************
 # 9. Save ----
 # *****************************************************
+# Two outputs, both one row per county with years as column suffixes:
+#
+# (A) ins_county: analysis-ready wide panel, 2015-2023, new doc for 2020
+#     onward. Columns: county, then vol_new_2015 ... fair_renew_2023.
+#     This is the file to use for analysis.
+#
+# (B) ins_county_overlap: archive of both doc vintages side by side for the
+#     overlap years (2020-2021) only. v2015_ prefix = 2015-2021 doc,
+#     v2020_ prefix = 2020-2023 doc. Use to inspect or reconcile differences
+#     from CDI's methodology change; do not mix vintages in trend analysis.
+#     Max differences in overlap years: vol_new ~6,500, vol_renew ~14,900,
+#     vol_non ~12,500 for large counties; fair columns smaller.
 
-ts("Saving panel...")
+ts("Saving outputs...")
 
-out_path <- paste0(data_derived, "2-01_cdi_county_panel_2015_2023.csv")
-write_csv(panel, out_path)
-cat(sprintf("  Saved %d rows -> %s\n", nrow(panel), out_path))
+# (A) ins_county: pivot long panel to wide (one row per county)
+ins_county <- panel %>%
+  pivot_wider(
+    id_cols     = county,
+    names_from  = year,
+    values_from = c(vol_new, vol_renew, vol_non, fair_new, fair_renew),
+    names_glue  = "{.value}_{year}"
+  ) %>%
+  arrange(county)
+
+saveRDS(ins_county, paste0(data_derived, "ins_county.rds"))
+cat(sprintf("  (A) Saved ins_county: %d rows x %d cols\n", nrow(ins_county), ncol(ins_county)))
+
+# (B) ins_county_overlap: overlap years only, both vintages side by side
+overlap_v2015 <- d2021 %>%
+  select(county, year, vol_new, vol_renew, vol_non, fair_new, fair_renew) %>%
+  pivot_wider(
+    id_cols     = county,
+    names_from  = year,
+    values_from = c(vol_new, vol_renew, vol_non, fair_new, fair_renew),
+    names_glue  = "v2015_{.value}_{year}"
+  )
+
+overlap_v2020 <- d2023 %>%
+  select(county, year, vol_new, vol_renew, vol_non, fair_new, fair_renew) %>%
+  pivot_wider(
+    id_cols     = county,
+    names_from  = year,
+    values_from = c(vol_new, vol_renew, vol_non, fair_new, fair_renew),
+    names_glue  = "v2020_{.value}_{year}"
+  )
+
+ins_county_overlap <- overlap_v2015 %>%
+  full_join(overlap_v2020, by = "county") %>%
+  arrange(county)
+
+saveRDS(ins_county_overlap, paste0(data_derived, "ins_county_overlap.rds"))
+cat(sprintf("  (B) Saved ins_county_overlap: %d rows x %d cols\n",
+            nrow(ins_county_overlap), ncol(ins_county_overlap)))
+
+rm(d2023, d2021, d2021_trim, panel, overlap_v2015, overlap_v2020)
 
 
 # ******************************
@@ -309,4 +379,7 @@ message("Total elapsed: ",
 cat(strrep("=", 70), "\n")
 savehistory(paste0(root, "Process/Logs/2-01_history_", timestamp, ".txt"))
 sink()
+
+
+
 
