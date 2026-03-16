@@ -17,14 +17,12 @@ root   <- paste0(user, "Institutional Investment/")
 secure <- "Y:/Institutional Investment/"
 
 data_input_s  <- paste0(secure, "Data/Source/")
-data_output_s <- paste0(secure, "Data/Derived/")
 
-transfer_root  <- paste0(data_input_s, "Cotality/September 2025 Transfer")
-sample_out_dir <- paste0(data_output_s, "Test Samples")
+transfer_root <- paste0(data_input_s, "Cotality/September 2025 Transfer")
 
-# logging
+# logging — secure path because output will contain PII (names etc.)
 timestamp  <- format(Sys.time(), "%Y-%m-%d_%H-%M")
-log_file   <- paste0(root, "Process/Logs/1-00_log_", timestamp, ".txt")
+log_file   <- paste0(secure, "Process/Logs/1-00_log_", timestamp, ".txt")
 sink(log_file, split = TRUE)
 on.exit(sink(), add = TRUE)
 start_time <- Sys.time()
@@ -36,7 +34,7 @@ cat("====================================================\n\n")
 set.seed(123)
 
 # load packages
-pkgs <- c("dplyr", "data.table", "lubridate", "R.utils")
+pkgs <- c("dplyr", "data.table", "lubridate")
 invisible(lapply(pkgs, function(p) {
   if (!require(p, character.only = TRUE)) {
     install.packages(p)
@@ -49,9 +47,6 @@ rm(pkgs)
 ts <- function(label = "") {
   cat(sprintf("\n[%s]  %s\n", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), label))
 }
-
-# ensure output directory exists
-if (!dir.exists(sample_out_dir)) dir.create(sample_out_dir, recursive = TRUE)
 
 # *****************************************************
 # 2. Discover CSV files ----
@@ -79,83 +74,85 @@ if (length(csv_files) == 0) stop("No matching CSV files found — check path.")
 # 3. Loop over each file ----
 # *****************************************************
 
-n_edge <- 5000L  # rows to pull from each end
+n_rows <- 15000L  # rows to load from top of each file
 
 for (f in csv_files) {
   
   file_base <- tools::file_path_sans_ext(basename(f))
+  subfolder <- basename(dirname(f))
   
   cat("\n\n")
   cat(strrep("=", 70), "\n")
   ts(paste("FILE:", basename(f)))
+  cat(sprintf("  Subfolder : %s\n", subfolder))
   cat(strrep("=", 70), "\n")
   
-  # --- 3a. Row count (cheap) ----
-  ts("  Counting rows...")
-  n_total <- R.utils::countLines(f) - 1L  # subtract header
-  cat(sprintf("  Total rows (excl. header): %s\n",
-              formatC(n_total, format = "d", big.mark = ",")))
+  # --- 3a. Load ----
+  ts(sprintf("  Loading first %s rows...",
+             formatC(n_rows, format = "d", big.mark = ",")))
   
-  # --- 3b. Load first + last N rows ----
-  ts(sprintf("  Loading first and last %s rows...",
-             formatC(n_edge, format = "d", big.mark = ",")))
-  
-  df_head <- as.data.frame(data.table::fread(
-    f, nrows = n_edge,
+  df <- as.data.frame(data.table::fread(
+    f, nrows = n_rows,
     na.strings = c("", "NA", "N/A", "null"),
     showProgress = FALSE
   ))
   
-  if (n_total > n_edge) {
-    df_tail <- as.data.frame(data.table::fread(
-      f, skip = n_total - n_edge,
-      na.strings = c("", "NA", "N/A", "null"),
-      showProgress = FALSE,
-      col.names = names(df_head)
-    ))
-    df <- rbind(df_head, df_tail)
-    rm(df_head, df_tail)
-    cat(sprintf("  Loaded %s rows (%s head + %s tail) of %s total\n",
-                formatC(nrow(df), format = "d", big.mark = ","),
-                formatC(n_edge,   format = "d", big.mark = ","),
-                formatC(n_edge,   format = "d", big.mark = ","),
-                formatC(n_total,  format = "d", big.mark = ",")))
+  cat(sprintf("  Loaded: %s rows x %d columns\n",
+              formatC(nrow(df), format = "d", big.mark = ","), ncol(df)))
+  
+  # --- 3b. Duplicate column names ----
+  dup_names <- names(df)[duplicated(names(df))]
+  if (length(dup_names) > 0) {
+    warning("Duplicate column names detected: ", paste(dup_names, collapse = ", "))
   } else {
-    df <- df_head
-    rm(df_head)
-    cat(sprintf("  File has <= %s rows — loaded all %s\n",
-                formatC(n_edge,   format = "d", big.mark = ","),
-                formatC(nrow(df), format = "d", big.mark = ",")))
+    cat("  No duplicate column names.\n")
   }
   
-  cat(sprintf("  Columns: %d\n", ncol(df)))
+  # --- 3c. Fully empty columns ----
+  empty_cols <- names(df)[sapply(df, function(x) all(is.na(x)))]
+  if (length(empty_cols) > 0) {
+    cat(sprintf("  WARNING: %d fully empty column(s): %s\n",
+                length(empty_cols), paste(empty_cols, collapse = ", ")))
+  } else {
+    cat("  No fully empty columns.\n")
+  }
   
-  # --- 3c. Column names ----
+  # --- 3d. Column names ----
   cat("\n--- COLUMN NAMES ---\n")
   print(colnames(df))
   
-  # --- 3d. Head (untruncated) ----
-  cat("\n--- HEAD (first 6 rows, all columns) ---\n")
+  # --- 3e. Head and tail (untruncated) ----
   old_width <- getOption("width")
   options(width = 300)
+  
+  cat("\n--- HEAD (first 6 rows, all columns) ---\n")
   print(head(df), row.names = FALSE)
+  
+  cat("\n--- TAIL (last 6 rows of loaded sample, all columns) ---\n")
+  print(tail(df), row.names = FALSE)
+  
   options(width = old_width)
   
-  # --- 3e. Summary stats by type ----
-  ts("  Running summary stats...")
-  
+  # --- 3f. Classify columns ----
   num_cols  <- names(df)[sapply(df, function(x) is.numeric(x) || is.integer(x))]
   date_cols <- names(df)[sapply(df, function(x) inherits(x, c("Date", "POSIXct", "POSIXlt")))]
   chr_cols  <- names(df)[sapply(df, function(x) is.character(x) || is.factor(x) || is.logical(x))]
+  
+  # --- 3g. Summary stats by type ----
+  ts("  Running summary stats...")
   
   # Numeric / integer
   if (length(num_cols) > 0) {
     cat("\n--- NUMERIC / INTEGER FIELDS ---\n")
     for (col in num_cols) {
       cat(sprintf("\n  >> %s\n", col))
-      vals <- df[[col]]
-      cat(sprintf("     N = %d  |  NAs = %d  (%.1f%%)\n",
-                  length(vals), sum(is.na(vals)), 100 * mean(is.na(vals))))
+      vals   <- df[[col]]
+      n_na   <- sum(is.na(vals))
+      n_zero <- sum(vals == 0, na.rm = TRUE)
+      cat(sprintf("     N = %d  |  NAs = %d (%.1f%%)  |  Zeros = %d (%.1f%% of non-NA)\n",
+                  length(vals),
+                  n_na,   100 * n_na   / length(vals),
+                  n_zero, 100 * n_zero / max(1, sum(!is.na(vals)))))
       if (sum(!is.na(vals)) > 0) print(summary(vals))
     }
   }
@@ -166,34 +163,39 @@ for (f in csv_files) {
     for (col in date_cols) {
       cat(sprintf("\n  >> %s\n", col))
       vals <- df[[col]]
-      cat(sprintf("     N = %d  |  NAs = %d  (%.1f%%)\n",
-                  length(vals), sum(is.na(vals)), 100 * mean(is.na(vals))))
+      n_na <- sum(is.na(vals))
+      cat(sprintf("     N = %d  |  NAs = %d (%.1f%%)\n",
+                  length(vals), n_na, 100 * n_na / length(vals)))
       if (sum(!is.na(vals)) > 0) print(summary(vals))
     }
   }
   
-  # Character / factor / logical -> table (cap at 50 unique values)
+  # Character / factor / logical
   if (length(chr_cols) > 0) {
     cat("\n--- CHARACTER / FACTOR / LOGICAL FIELDS ---\n")
     for (col in chr_cols) {
-      vals   <- df[[col]]
-      n_uniq <- length(unique(na.omit(vals)))
-      cat(sprintf("\n  >> %s  (%d unique non-NA values, %d NAs)\n",
-                  col, n_uniq, sum(is.na(vals))))
-      if (n_uniq <= 50) {
-        print(table(vals, useNA = "always"))
+      vals     <- df[[col]]
+      n_total  <- length(vals)
+      n_na     <- sum(is.na(vals))
+      n_uniq   <- length(unique(na.omit(vals)))
+      pct_uniq <- round(100 * n_uniq / max(1, n_total - n_na), 1)
+      cat(sprintf("\n  >> %s\n", col))
+      cat(sprintf("     N = %d  |  NAs = %d (%.1f%%)  |  Unique (non-NA) = %d (%.1f%% of non-NA)\n",
+                  n_total, n_na, 100 * n_na / n_total, n_uniq, pct_uniq))
+      tbl <- sort(table(vals, useNA = "always"), decreasing = TRUE)
+      if (n_uniq <= 15) {
+        print(tbl)
       } else {
-        cat("     (> 50 unique values — showing top 20 by frequency)\n")
-        tbl <- sort(table(vals, useNA = "always"), decreasing = TRUE)
-        print(head(tbl, 20))
+        cat(sprintf("     (showing top 15 of %d unique values)\n", n_uniq))
+        print(head(tbl, 15))
       }
     }
   }
   
-  # --- 3f. Save sample & clean up ----
+  # --- 3h. Clean up ----
   ts("  Cleaning up...")
   
-  # out_path <- file.path(sample_out_dir, paste0("1-00_", file_base, ".rds"))
+  # out_path <- file.path(paste0(secure, "Data/Derived/Test Samples"), paste0("1-00_", file_base, ".rds"))
   # saveRDS(df, file = out_path)
   # cat(sprintf("  Saved %s-row sample -> %s\n",
   #             formatC(nrow(df), format = "d", big.mark = ","), out_path))
@@ -215,5 +217,5 @@ message("Total elapsed: ",
         " minutes")
 cat(strrep("=", 70), "\n")
 
-savehistory(paste0(root, "Process/Logs/1-00_history_", timestamp, ".txt"))
+savehistory(paste0(secure, "Process/Logs/1-00_history_", timestamp, ".txt"))
 sink()
