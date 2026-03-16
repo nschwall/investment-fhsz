@@ -108,6 +108,201 @@ for (f in csv_files) {
   rm(df)
 }
 
+
+# ******************************
+# 5. some looks ----
+
+
+# ------------------------------------------------------------------------------
+# Check whether hist_01 through hist_15 all have the same column structure
+# ------------------------------------------------------------------------------
+
+hist_list <- mget(sprintf("hist_%02d", 1:15))
+
+same_colnames <- all(
+  sapply(hist_list, function(x) identical(names(x), names(hist_list[[1]])))
+)
+
+print(same_colnames)
+
+# ----------------------------------------------------------------------
+# Quick checks on TAX YEAR distributions
+# ----------------------------------------------------------------------
+
+summary(hist_01$`TAX YEAR`)
+summary(hist_02$`TAX YEAR`)
+summary(hist_03$`TAX YEAR`)
+summary(hist_15$`TAX YEAR`)
+
+# Optional: confirm expected number of unique CLIPs in hist_01
+length(unique(hist_01$CLIP))
+
+# ----------------------------------------------------------------------
+# Example tabulations from hist_08
+# ----------------------------------------------------------------------
+
+table(hist_08$`OWNER OCCUPANCY CODE`, useNA = "always")
+
+table(
+  hist_08$`OWNER OCCUPANCY CODE`,
+  hist_08$`OWNER 1 CORPORATE INDICATOR`,
+  useNA = "always"
+)
+
+table(
+  hist_08$`OWNER OCCUPANCY CODE`,
+  hist_08$`OWNER OWNERSHIP RIGHTS CODE`,
+  useNA = "always"
+)
+
+table(
+  hist_08$`HOMESTEAD EXEMPT INDICATOR`,
+  hist_08$`OWNER 1 CORPORATE INDICATOR`,
+  useNA = "always"
+)
+
+table(
+  hist_08$`OWNER OCCUPANCY CODE`,
+  hist_08$`HOMESTEAD EXEMPT INDICATOR`,
+  useNA = "always"
+)
+
+summary(hist_08$`YEAR BUILT`)
+
+
+# ----------------------------------------------------------------------
+# Trying to figure out diff in owner transfer files
+# ----------------------------------------------------------------------
+
+
+identical(
+  names(owner_transfer_014500),
+  names(owner_transfer_144502)
+)
+
+length(intersect(
+  owner_transfer_014500$CLIP,
+  owner_transfer_144502$CLIP
+))
+
+
+# find overlapping CLIPs
+common_clips <- intersect(
+  owner_transfer_014500$CLIP,
+  owner_transfer_144502$CLIP
+)
+
+# add source labels
+owner_transfer_014500$source <- "014500"
+owner_transfer_144502$source <- "144502"
+
+# bind rows from both datasets for those CLIPs
+ot_common <- rbind(
+  owner_transfer_014500[owner_transfer_014500$CLIP %in% common_clips, ],
+  owner_transfer_144502[owner_transfer_144502$CLIP %in% common_clips, ]
+)
+
+# drop rows where CLIP is NA
+ot_common <- ot_common[!is.na(ot_common$CLIP), ]
+
+# sort for easier comparison
+ot_common <- ot_common[order(ot_common$CLIP), ]
+
+# inspect
+View(ot_common)
+
+# see if identical
+# split the two sources
+ot014500 <- ot_common[ot_common$source == "014500", ]
+ot144502 <- ot_common[ot_common$source == "144502", ]
+
+# remove the source column for comparison
+ot014500$source <- NULL
+ot144502$source <- NULL
+
+# check if the data are identical
+identical(ot014500, ot144502)
+
+
+# ----------------------------------------------------------------------
+# Example tabulations from owner_transfer_014500
+# ----------------------------------------------------------------------
+
+
+
+
+table(
+  owner_transfer_014500$`RESIDENTIAL INDICATOR`,
+  owner_transfer_014500$`INVESTOR PURCHASE INDICATOR`,
+  useNA = "always"
+)
+
+table(
+  owner_transfer_014500$`BUYER 1 CORPORATE INDICATOR`,
+  owner_transfer_014500$`INVESTOR PURCHASE INDICATOR`,
+  useNA = "always"
+)
+
+
+
+# ----------------------------------------------------------------------
+# Checking some dates
+# ----------------------------------------------------------------------
+
+owner_transfer_014500$`SALE DERIVED DATE` <- as.Date(
+  as.character(owner_transfer_014500$`SALE DERIVED DATE`),
+  format = "%Y%m%d"
+)
+
+owner_transfer_014500$`TRANSACTION BATCH DATE` <- as.Date(
+  as.character(owner_transfer_014500$`TRANSACTION BATCH DATE`),
+  format = "%Y%m%d"
+)
+
+owner_transfer_014500$`SALE DERIVED RECORDING DATE` <- as.Date(
+  as.character(owner_transfer_014500$`SALE DERIVED RECORDING DATE`),
+  format = "%Y%m%d"
+)
+
+summary(owner_transfer_014500$`SALE DERIVED DATE`)
+summary(owner_transfer_014500$`SALE DERIVED RECORDING DATE`)
+summary(owner_transfer_014500$`TRANSACTION BATCH DATE`)
+
+
+summary(as.numeric(owner_transfer_014500$`SALE DERIVED DATE` - owner_transfer_014500$`SALE DERIVED RECORDING DATE`))
+summary(as.numeric(owner_transfer_014500$`SALE DERIVED DATE` - owner_transfer_014500$`TRANSACTION BATCH DATE`))
+summary(as.numeric(owner_transfer_014500$`SALE DERIVED RECORDING DATE` - owner_transfer_014500$`TRANSACTION BATCH DATE`))
+
+
+
+# other owner transfer 
+owner_transfer_144502$`SALE DERIVED DATE` <- as.Date(
+  as.character(owner_transfer_144502$`SALE DERIVED DATE`),
+  format = "%Y%m%d"
+)
+
+owner_transfer_144502$`TRANSACTION BATCH DATE` <- as.Date(
+  as.character(owner_transfer_144502$`TRANSACTION BATCH DATE`),
+  format = "%Y%m%d"
+)
+
+owner_transfer_144502$`SALE DERIVED RECORDING DATE` <- as.Date(
+  as.character(owner_transfer_144502$`SALE DERIVED RECORDING DATE`),
+  format = "%Y%m%d"
+)
+
+summary(owner_transfer_144502$`SALE DERIVED DATE`)
+summary(owner_transfer_144502$`SALE DERIVED RECORDING DATE`)
+summary(owner_transfer_144502$`TRANSACTION BATCH DATE`)
+
+
+summary(as.numeric(owner_transfer_144502$`SALE DERIVED DATE` - owner_transfer_144502$`SALE DERIVED RECORDING DATE`))
+summary(as.numeric(owner_transfer_144502$`SALE DERIVED DATE` - owner_transfer_144502$`TRANSACTION BATCH DATE`))
+summary(as.numeric(owner_transfer_144502$`SALE DERIVED RECORDING DATE` - owner_transfer_144502$`TRANSACTION BATCH DATE`))
+
+
+
+
 # ******************************
 # 5. Close out ----
 cat("\n\n")
