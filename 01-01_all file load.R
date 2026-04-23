@@ -13,7 +13,7 @@
 # *************
 # 1. Setup ----
 user   <- "C:/Users/Nora Schwaller/Dropbox (Personal)/"
-root   <- paste0(user, "Institutional Investment/")
+root   <- paste0(user, "Fire Investment/")
 secure <- "Y:/Institutional Investment/"
 
 data_input_s <- paste0(secure, "Data/Source/")
