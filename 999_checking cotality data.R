@@ -29,7 +29,8 @@ cat("\n====================================================\n")
 cat("  999_owner_transfer_144502_explore.R  |  Started:", format(start_time), "\n")
 cat("====================================================\n\n")
 
-pkgs <- c("dplyr", "tidyverse", "data.table", "ggplot2", "lubridate")
+# load packages
+pkgs <- c("dplyr", "tidyverse", "data.table", "ggplot2", "lubridate", "R.utils")
 invisible(lapply(pkgs, function(p) {
   if (!require(p, character.only = TRUE)) {
     install.packages(p)
@@ -38,6 +39,13 @@ invisible(lapply(pkgs, function(p) {
 }))
 rm(pkgs)
 
+# timestamp defined AFTER packages load to avoid R.utils masking
+timestamp <- format(Sys.time(), "%Y-%m-%d_%H-%M")
+log_file  <- paste0(secure, "Process/Fire Investment/Logs/999_owner_transfer_explore_", timestamp, ".txt")
+sink(log_file, split = TRUE)
+on.exit(sink(), add = TRUE)
+
+# helpers
 ts <- function(label = "") {
   cat(sprintf("\n[%s]  %s\n", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), label))
 }
@@ -66,13 +74,11 @@ convert_date_cols <- function(df) {
   df
 }
 
-# helper: recode buyX_corp
-# Y = corporate, 0 = name present but not corporate, NA = no buyer at that position
 recode_corp <- function(corp_col, name_col) {
   dplyr::case_when(
-    corp_col == "Y"               ~ 1L,
+    corp_col == "Y"                     ~ 1L,
     is.na(corp_col) & !is.na(name_col) ~ 0L,
-    TRUE                          ~ NA_integer_
+    TRUE                                ~ NA_integer_
   )
 }
 
@@ -204,19 +210,21 @@ cat(sprintf("  Slimmed to: %s rows x %d columns\n",
 # 5b. Suss out key fields before subsetting ----
 # *****************************************************
 
-# --- Property indicator x mobile home ---
+# checking what values prop_indicator takes and whether
+# mobile_home is a useful complement for filtering to SFR
 cat("\nprop_indicator x mobile_home:\n")
 print(table(ot$prop_indicator, ot$mobile_home, useNA = "always"))
 
-# --- Property indicator x number of buildings ---
+# checking whether bldg_count helps narrow down SFR
 cat("\nprop_indicator x bldg_count:\n")
 print(table(ot$prop_indicator, ot$bldg_count, useNA = "always"))
 
-# --- Sale document type ---
+# checking what sale_doc_type values look like
 cat("\nsale_doc_type:\n")
 print(table(ot$sale_doc_type, useNA = "always"))
 
-# --- Unique CLIP count ---
+# CLIPs should have duplicates — one row per transaction
+# confirming this before subsetting
 cat("\nTotal rows:\n")
 print(nrow(ot))
 cat("\nUnique CLIPs:\n")
@@ -228,11 +236,9 @@ print(sum(table(ot$clip_id) > 1))
 # *****************************************************
 # 5c. Recode buyX_corp on full file ----
 # *****************************************************
-# Recode all four buyer corp indicators:
-#   1  = corporate (Y in original)
-#   0  = buyer present but not flagged corporate
-#   NA = no buyer at that position (both name and corp are NA)
-# This allows cross-tabs across buyer positions to check consistency
+# 1  = corporate (Y in original)
+# 0  = buyer present but not flagged corporate
+# NA = no buyer at that position
 
 ts("Recoding buyX_corp indicators...")
 
@@ -253,9 +259,6 @@ print(table(ot$buy3_corp, useNA = "always"))
 cat("\nbuy4_corp after recode:\n")
 print(table(ot$buy4_corp, useNA = "always"))
 
-# cross-tabs to check consistency across buyer positions
-# if buy1 is corporate, is buy2 also corporate?
-# are there cases where buy1 is not corporate but buy2 is?
 cat("\nbuy1_corp x buy2_corp:\n")
 print(table(ot$buy1_corp, ot$buy2_corp, useNA = "always"))
 
@@ -265,13 +268,38 @@ print(table(ot$buy1_corp, ot$buy3_corp, useNA = "always"))
 cat("\nbuy1_corp x buy4_corp:\n")
 print(table(ot$buy1_corp, ot$buy4_corp, useNA = "always"))
 
-# spot check — cases where buy1 is NOT corporate but buy2 IS
-# these might be missed corporate purchases if entity is listed second on deed
+# cases where buy1 is not corporate but buy2 is — potential missed corporate purchases
 cat("\nbuy1_corp = 0 but buy2_corp = 1 (corporate entity listed second on deed):\n")
 print(head(
   ot[!is.na(ot$buy1_corp) & ot$buy1_corp == 0 &
        !is.na(ot$buy2_corp) & ot$buy2_corp == 1,
      c("buy1_name", "buy2_name")],
+  20
+))
+
+# consistency check across all four buyer positions
+# NA = single buyer transaction, nothing to compare
+# 1  = all present buyers agree
+# 0  = discordant — mix of corporate and non-corporate across positions
+ot$corp_consistent <- apply(
+  ot[, c("buy1_corp", "buy2_corp", "buy3_corp", "buy4_corp")],
+  1,
+  function(x) {
+    present <- x[!is.na(x)]
+    if (length(present) <= 1) return(NA)
+    as.integer(length(unique(present)) == 1)
+  }
+)
+
+cat("\ncorp_consistent:\n")
+print(table(ot$corp_consistent, useNA = "always"))
+
+# discordant rows — will be dropped in 1-02 cleaning as ambiguous
+cat("\nSample of inconsistent rows:\n")
+print(head(
+  ot[!is.na(ot$corp_consistent) & ot$corp_consistent == 0,
+     c("buy1_name", "buy1_corp", "buy2_name", "buy2_corp",
+       "buy3_name", "buy3_corp", "buy4_name", "buy4_corp")],
   20
 ))
 
@@ -333,7 +361,7 @@ other_keywords <- "\\b(trust|district|current owner|poa|trustee|guardian|custodi
 ot_sub$corp_flag  <- grepl(corp_keywords, ot_sub$buy1_name, ignore.case = TRUE)
 ot_sub$other_flag <- grepl(other_keywords, ot_sub$buy1_name, ignore.case = TRUE)
 
-# real estate contains "estate" so un-flag other_flag where buy1_name has "real estate"
+# real estate contains "estate" — un-flag other_flag where buy1_name has "real estate"
 ot_sub$other_flag <- ifelse(
   grepl("real estate", ot_sub$buy1_name, ignore.case = TRUE),
   FALSE,
@@ -386,6 +414,10 @@ print(sort(table(words), decreasing = TRUE)[1:50])
 # *****************************************************
 # 9. buy1_corp and investor flag comparison ----
 # *****************************************************
+# investor flag captures individual absentee buyers / small landlords
+# not corporate investors in the way this study conceptualises them
+# buy1_corp is the better primary flag for corporate investor identification
+
 cat("\nbuy1_corp x investor:\n")
 print(table(ot_sub$buy1_corp, ot_sub$investor, useNA = "always"))
 
@@ -399,6 +431,12 @@ print(head(unique(ot_sub$buy1_name[ot_sub$buy1_corp == 1 & ot_sub$investor == 0]
 # *****************************************************
 # 10. buy1_corp and buy_occ comparison ----
 # *****************************************************
+# buy_occ: S = owner-occupied, T = absentee, A = absentee (rare)
+# not fully reliable as primary signal — some corporate entities
+# coded as owner-occupied for unclear reasons
+# may be useful for sensitivity analyses (e.g. excluding absentee
+# non-corporate buyers who may be vacation property purchasers)
+
 cat("\nbuy1_corp x buy_occ:\n")
 print(table(ot_sub$buy1_corp, ot_sub$buy_occ, useNA = "always"))
 
@@ -424,5 +462,6 @@ print(head(unique(ot_sub$buy1_name[ot_sub$investor == 0 & ot_sub$buy_occ == "T"]
 message("Total elapsed: ",
         round(difftime(Sys.time(), start_time, units = "mins"), 2), " minutes")
 
-
+savehistory(paste0(secure, "Process/Fire Investment/Logs/999_owner_transfer_explore_history_", timestamp, ".txt"))
+sink()
 
