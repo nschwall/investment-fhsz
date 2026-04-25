@@ -143,6 +143,9 @@ ot <- ot %>%
     fips                = fips_code,
     apn_unformatted     = apn_parcel_number_unformatted,
     landuse_code        = land_use_code_static,
+    county_use          = county_use_description_static,
+    state_use           = state_use_description_static,
+    zoning              = zoning_code_static,
     prop_indicator      = property_indicator_code_static,
     mobile_home         = mobile_home_indicator,
     bldg_count          = total_number_of_buildings,
@@ -187,7 +190,8 @@ ot <- ot %>%
   ) %>%
   dplyr::select(
     clip_id, prev_clip, fips, apn_unformatted,
-    landuse_code, prop_indicator, mobile_home, bldg_count,
+    landuse_code, county_use, state_use, zoning,
+    prop_indicator, mobile_home, bldg_count,
     situs_addr, situs_city, situs_state, situs_zip, situs_county,
     txn_id, batch_date, sale_date, sale_rec_date,
     sale_amt, sale_type, sale_doc_type, deed_cat, primary_cat, pending,
@@ -223,8 +227,11 @@ print(table(ot$prop_indicator, ot$bldg_count, useNA = "always"))
 cat("\nsale_doc_type:\n")
 print(table(ot$sale_doc_type, useNA = "always"))
 
+# cross-tab sale_doc_type x interfamily to validate non-arms-length flag
+cat("\nsale_doc_type x interfamily:\n")
+print(table(ot$sale_doc_type, ot$interfamily, useNA = "always"))
+
 # CLIPs should have duplicates — one row per transaction
-# confirming this before subsetting
 cat("\nTotal rows:\n")
 print(nrow(ot))
 cat("\nUnique CLIPs:\n")
@@ -268,7 +275,6 @@ print(table(ot$buy1_corp, ot$buy3_corp, useNA = "always"))
 cat("\nbuy1_corp x buy4_corp:\n")
 print(table(ot$buy1_corp, ot$buy4_corp, useNA = "always"))
 
-# cases where buy1 is not corporate but buy2 is — potential missed corporate purchases
 cat("\nbuy1_corp = 0 but buy2_corp = 1 (corporate entity listed second on deed):\n")
 print(head(
   ot[!is.na(ot$buy1_corp) & ot$buy1_corp == 0 &
@@ -277,10 +283,6 @@ print(head(
   20
 ))
 
-# consistency check across all four buyer positions
-# NA = single buyer transaction, nothing to compare
-# 1  = all present buyers agree
-# 0  = discordant — mix of corporate and non-corporate across positions
 ot$corp_consistent <- apply(
   ot[, c("buy1_corp", "buy2_corp", "buy3_corp", "buy4_corp")],
   1,
@@ -294,7 +296,6 @@ ot$corp_consistent <- apply(
 cat("\ncorp_consistent:\n")
 print(table(ot$corp_consistent, useNA = "always"))
 
-# discordant rows — will be dropped in 1-02 cleaning as ambiguous
 cat("\nSample of inconsistent rows:\n")
 print(head(
   ot[!is.na(ot$corp_consistent) & ot$corp_consistent == 0,
@@ -302,6 +303,46 @@ print(head(
        "buy3_name", "buy3_corp", "buy4_name", "buy4_corp")],
   20
 ))
+
+
+# *****************************************************
+# 5d. Explore prop_indicator with use descriptions ----
+# *****************************************************
+# using county_use, state_use, and zoning to decode prop_indicator
+# goal is to identify which prop_indicator values correspond to SFR
+
+ts("Exploring prop_indicator with use descriptions...")
+
+# unique combinations of prop_indicator, landuse_code, county_use, state_use
+# sorted by prop_indicator to group them — look for SFR patterns
+cat("\nUnique prop_indicator x landuse_code x county_use (top 100):\n")
+combos <- unique(ot[, c("prop_indicator", "landuse_code", "county_use", "state_use")])
+combos <- combos[order(combos$prop_indicator, combos$landuse_code), ]
+print(head(combos, 100))
+
+# frequency of each prop_indicator — how many transactions per type
+cat("\nprop_indicator frequency:\n")
+print(sort(table(ot$prop_indicator, useNA = "always"), decreasing = TRUE))
+
+# for each prop_indicator, what are the most common county_use descriptions?
+# this is the most direct way to decode what each code means
+cat("\nTop county_use values by prop_indicator:\n")
+for (pi in sort(unique(na.omit(ot$prop_indicator)))) {
+  cat(sprintf("\n  prop_indicator = %s:\n", pi))
+  sub <- ot$county_use[ot$prop_indicator == pi]
+  tbl <- sort(table(sub, useNA = "always"), decreasing = TRUE)
+  print(head(tbl, 5))
+}
+
+# zoning codes by prop_indicator — secondary check
+# zoning is county-specific so less clean but may help for edge cases
+cat("\nTop zoning values by prop_indicator:\n")
+for (pi in sort(unique(na.omit(ot$prop_indicator)))) {
+  cat(sprintf("\n  prop_indicator = %s:\n", pi))
+  sub <- ot$zoning[ot$prop_indicator == pi]
+  tbl <- sort(table(sub, useNA = "always"), decreasing = TRUE)
+  print(head(tbl, 5))
+}
 
 
 # *****************************************************
@@ -361,14 +402,12 @@ other_keywords <- "\\b(trust|district|current owner|poa|trustee|guardian|custodi
 ot_sub$corp_flag  <- grepl(corp_keywords, ot_sub$buy1_name, ignore.case = TRUE)
 ot_sub$other_flag <- grepl(other_keywords, ot_sub$buy1_name, ignore.case = TRUE)
 
-# real estate contains "estate" — un-flag other_flag where buy1_name has "real estate"
 ot_sub$other_flag <- ifelse(
   grepl("real estate", ot_sub$buy1_name, ignore.case = TRUE),
   FALSE,
   ot_sub$other_flag
 )
 
-# if other_flag is TRUE, override corp_flag to FALSE
 ot_sub$corp_flag <- ifelse(ot_sub$other_flag == TRUE, FALSE, ot_sub$corp_flag)
 
 cat("\ncorp_flag:\n")
@@ -414,10 +453,6 @@ print(sort(table(words), decreasing = TRUE)[1:50])
 # *****************************************************
 # 9. buy1_corp and investor flag comparison ----
 # *****************************************************
-# investor flag captures individual absentee buyers / small landlords
-# not corporate investors in the way this study conceptualises them
-# buy1_corp is the better primary flag for corporate investor identification
-
 cat("\nbuy1_corp x investor:\n")
 print(table(ot_sub$buy1_corp, ot_sub$investor, useNA = "always"))
 
@@ -431,12 +466,6 @@ print(head(unique(ot_sub$buy1_name[ot_sub$buy1_corp == 1 & ot_sub$investor == 0]
 # *****************************************************
 # 10. buy1_corp and buy_occ comparison ----
 # *****************************************************
-# buy_occ: S = owner-occupied, T = absentee, A = absentee (rare)
-# not fully reliable as primary signal — some corporate entities
-# coded as owner-occupied for unclear reasons
-# may be useful for sensitivity analyses (e.g. excluding absentee
-# non-corporate buyers who may be vacation property purchasers)
-
 cat("\nbuy1_corp x buy_occ:\n")
 print(table(ot_sub$buy1_corp, ot_sub$buy_occ, useNA = "always"))
 
