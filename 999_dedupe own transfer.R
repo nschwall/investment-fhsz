@@ -1,12 +1,14 @@
 
 
+
+
 # **************************************************
 #                     DETAILS
 #
-# Purpose:   Scratch — identify duplicate/overlapping transactions
-#            between owner_transfer_144502 and owner_transfer_014500
-#            Load each file slimmed to key columns, rbind, then
-#            identify non-unique CLIPs and examine overlap
+# Purpose:   Scratch — understand the relationship between
+#            owner_transfer_144502 and owner_transfer_014500
+#            Start by understanding each file individually,
+#            then compare
 # Author:    Nora Schwaller
 # Assisted:  Claude Sonnet 4.6 (Anthropic), claude.ai, 2026-04-25
 # Started:   MM/DD/YYYY
@@ -50,7 +52,7 @@ ts <- function(label = "") {
   cat(sprintf("\n[%s]  %s\n", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), label))
 }
 
-# columns to keep — must match exact raw column names in the CSV
+# columns to keep — exact raw names from CSV
 keep_cols <- c(
   "CLIP",
   "APN SEQUENCE NUMBER",
@@ -62,7 +64,12 @@ keep_cols <- c(
   "BUYER 2 FULL NAME",
   "SELLER 1 FULL NAME",
   "SELLER 2 FULL NAME",
-  "RECORD ACTION INDICATOR"
+  "SALE DOCUMENT TYPE CODE",
+  "INTERFAMILY RELATED INDICATOR",
+  "PENDING RECORD INDICATOR",
+  "MULTI OR SPLIT PARCEL CODE",
+  "OWNERSHIP TRANSFER PERCENTAGE",
+  "PROPERTY INDICATOR CODE - STATIC"
 )
 
 # helper: normalize column names to lowercase + underscores
@@ -77,7 +84,7 @@ normalize_names <- function(df) {
   df
 }
 
-# helper: convert YYYYMMDD integer/character columns to Date
+# helper: convert YYYYMMDD columns to Date
 convert_date_cols <- function(df) {
   date_cols <- names(df)[grepl("date", names(df), ignore.case = TRUE)]
   for (col in date_cols) {
@@ -128,16 +135,20 @@ ot_144502 <- as.data.frame(data.table::fread(
   showProgress = TRUE
 ))
 
+ot_144502 <- normalize_names(ot_144502)
+ot_144502 <- convert_date_cols(ot_144502)
+
 cat(sprintf("  %s rows x %d columns\n",
             formatC(nrow(ot_144502), format = "d", big.mark = ","),
             ncol(ot_144502)))
-
-ts("  Normalizing column names...")
-ot_144502 <- normalize_names(ot_144502)
-ot_144502 <- convert_date_cols(ot_144502)
-ot_144502$source <- "144502"
-
 cat(sprintf("  Columns: %s\n", paste(names(ot_144502), collapse = ", ")))
+
+cat(sprintf("\n  Before SFR filter (prop_indicator == 10): %s rows\n",
+            formatC(nrow(ot_144502), format = "d", big.mark = ",")))
+ot_144502 <- ot_144502[!is.na(ot_144502$property_indicator_code_static) &
+                         ot_144502$property_indicator_code_static == "10", ]
+cat(sprintf("  After SFR filter: %s rows\n",
+            formatC(nrow(ot_144502), format = "d", big.mark = ",")))
 
 gc()
 ts("  gc() done")
@@ -155,127 +166,119 @@ ot_014500 <- as.data.frame(data.table::fread(
   showProgress = TRUE
 ))
 
+ot_014500 <- normalize_names(ot_014500)
+ot_014500 <- convert_date_cols(ot_014500)
+
 cat(sprintf("  %s rows x %d columns\n",
             formatC(nrow(ot_014500), format = "d", big.mark = ","),
             ncol(ot_014500)))
 
-ts("  Normalizing column names...")
-ot_014500 <- normalize_names(ot_014500)
-ot_014500 <- convert_date_cols(ot_014500)
-ot_014500$source <- "014500"
+cat(sprintf("\n  Before SFR filter (prop_indicator == 10): %s rows\n",
+            formatC(nrow(ot_014500), format = "d", big.mark = ",")))
+ot_014500 <- ot_014500[!is.na(ot_014500$property_indicator_code_static) &
+                         ot_014500$property_indicator_code_static == "10", ]
+cat(sprintf("  After SFR filter: %s rows\n",
+            formatC(nrow(ot_014500), format = "d", big.mark = ",")))
 
 gc()
 ts("  gc() done")
 
 
 # *****************************************************
-# 5. Rbind ----
+# 5. Understand each file individually ----
 # *****************************************************
-ts("Binding rows...")
+ts("Examining each file individually...")
 
-ot_combined <- rbind(ot_144502, ot_014500)
-
-cat(sprintf("  Combined: %s rows x %d columns\n",
-            formatC(nrow(ot_combined), format = "d", big.mark = ","),
-            ncol(ot_combined)))
-
-rm(ot_144502, ot_014500)
-gc()
-ts("  Removed source objects, gc() done")
-
-cat("\nSource breakdown:\n")
-print(table(ot_combined$source, useNA = "always"))
-
-
-# *****************************************************
-# 6. Identify CLIPs appearing in both files ----
-# *****************************************************
-ts("Identifying CLIPs appearing in both files...")
-
-clip_sources <- aggregate(
-  source ~ clip,
-  data    = unique(ot_combined[, c("clip", "source")]),
-  FUN     = function(x) paste(sort(unique(x)), collapse = "+")
-)
-names(clip_sources)[2] <- "sources"
-
-cat("\nCLIP source breakdown:\n")
-print(table(clip_sources$sources, useNA = "always"))
-
-clips_in_both <- clip_sources$clip[clip_sources$sources == "014500+144502"]
-
-cat(sprintf("\n  %s CLIPs appear in both files\n",
-            formatC(length(clips_in_both), format = "d", big.mark = ",")))
-cat(sprintf("  %.1f%% of all unique CLIPs\n",
-            100 * length(clips_in_both) / nrow(clip_sources)))
-
-
-# *****************************************************
-# 7. Subset to CLIPs in both files ----
-# *****************************************************
-ts("Subsetting to CLIPs appearing in both files...")
-
-ot_overlap <- ot_combined[ot_combined$clip %in% clips_in_both, ]
-ot_overlap  <- ot_overlap[order(ot_overlap$clip, ot_overlap$sale_derived_date), ]
-
-cat(sprintf("  %s rows for overlapping CLIPs\n",
-            formatC(nrow(ot_overlap), format = "d", big.mark = ",")))
-
-cat("\nSource breakdown within overlap subset:\n")
-print(table(ot_overlap$source, useNA = "always"))
-
-
-# *****************************************************
-# 8. Examine overlap ----
-# *****************************************************
-ts("Examining overlap...")
-
-# are any rows completely identical ignoring source column?
-ot_overlap_nosrc <- ot_overlap[, !names(ot_overlap) %in% "source"]
-n_exact_dupes <- sum(duplicated(ot_overlap_nosrc))
-cat(sprintf("\n  Exact duplicate rows (ignoring source): %s\n",
-            formatC(n_exact_dupes, format = "d", big.mark = ",")))
-
-# for overlapping CLIPs, do sale dates differ between files?
-cat("\nFor overlapping CLIPs — do sale dates differ between files?\n")
-date_check <- aggregate(
-  sale_derived_date ~ clip + source,
-  data = ot_overlap,
-  FUN  = function(x) paste(sort(unique(as.character(x))), collapse = ", ")
-)
-
-date_wide <- reshape(date_check,
-                     idvar     = "clip",
-                     timevar   = "source",
-                     direction = "wide")
-names(date_wide) <- gsub("sale_derived_date\\.", "dates_", names(date_wide))
-
-if (all(c("dates_144502", "dates_014500") %in% names(date_wide))) {
-  same_dates <- sum(date_wide$dates_144502 == date_wide$dates_014500, na.rm = TRUE)
-  diff_dates <- sum(date_wide$dates_144502 != date_wide$dates_014500, na.rm = TRUE)
-  cat(sprintf("  CLIPs with same sale date set in both files:  %s\n",
-              formatC(same_dates, format = "d", big.mark = ",")))
-  cat(sprintf("  CLIPs with different sale date sets:          %s\n",
-              formatC(diff_dates, format = "d", big.mark = ",")))
+# create transaction keys
+for (obj in c("ot_144502", "ot_014500")) {
+  df <- get(obj)
+  df$txn_date   <- paste(df$clip, df$sale_derived_date,  sep = "_")
+  df$txn_buyer  <- paste(df$clip, df$buyer_1_full_name,  sep = "_")
+  df$txn_seller <- paste(df$clip, df$seller_1_full_name, sep = "_")
+  assign(obj, df)
 }
 
-# sample of overlapping rows
-cat("\nSample of overlapping CLIP rows (first 10 CLIPs, all transactions):\n")
-sample_clips <- head(unique(ot_overlap$clip), 10)
-print(ot_overlap[ot_overlap$clip %in% sample_clips,
-                 c("clip", "source", "sale_derived_date", "sale_amount",
-                   "buyer_1_full_name", "seller_1_full_name", "record_action_indicator")])
+for (obj in c("ot_144502", "ot_014500")) {
+  df <- get(obj)
+  cat(sprintf("\n--- %s ---\n", obj))
+  cat(sprintf("Rows: %s\n", formatC(nrow(df), format = "d", big.mark = ",")))
+  
+  cat("Sale date range:\n")
+  print(summary(df$sale_derived_date))
+  
+  cat("\nWithin-file duplicate txn_date (clip + sale date):\n")
+  print(table(duplicated(df$txn_date), useNA = "always"))
+  
+  cat("\nWithin-file duplicate txn_buyer (clip + buyer):\n")
+  print(table(duplicated(df$txn_buyer), useNA = "always"))
+  
+  cat("\nWithin-file duplicate txn_seller (clip + seller):\n")
+  print(table(duplicated(df$txn_seller), useNA = "always"))
+  
+  cat("\nSale doc type for within-file txn_date dupes:\n")
+  dup_keys <- df$txn_date[duplicated(df$txn_date)]
+  print(table(df$sale_document_type_code[df$txn_date %in% dup_keys], useNA = "always"))
+  
+  cat("\nInterfamily for within-file txn_date dupes:\n")
+  print(table(df$interfamily_related_indicator[df$txn_date %in% dup_keys], useNA = "always"))
+  
+  cat("\nMulti/split parcel for within-file txn_date dupes:\n")
+  print(table(df$multi_or_split_parcel_code[df$txn_date %in% dup_keys], useNA = "always"))
+  
+  cat("\nPending for within-file txn_date dupes:\n")
+  print(table(df$pending_record_indicator[df$txn_date %in% dup_keys], useNA = "always"))
+  
+  cat("\nSample of within-file txn_date dupes (sorted by clip, NA clips excluded):\n")
+  sub <- df[df$txn_date %in% dup_keys & !is.na(df$clip), ]
+  sub <- sub[order(sub$clip, sub$sale_derived_date), ]
+  print(head(sub, 30))
+}
 
-# record_action_indicator distribution within overlap
-cat("\nrecord_action_indicator in overlap subset:\n")
-print(table(ot_overlap$record_action_indicator, ot_overlap$source, useNA = "always"))
+
+# *****************************************************
+# 6. Compare across files ----
+# *****************************************************
+ts("Comparing across files...")
+
+cat("\ntxn_date keys:\n")
+cat(sprintf("  Shared:          %s\n", formatC(length(intersect(ot_144502$txn_date, ot_014500$txn_date)), format = "d", big.mark = ",")))
+cat(sprintf("  Only in 144502:  %s\n", formatC(length(setdiff(ot_144502$txn_date, ot_014500$txn_date)), format = "d", big.mark = ",")))
+cat(sprintf("  Only in 014500:  %s\n", formatC(length(setdiff(ot_014500$txn_date, ot_144502$txn_date)), format = "d", big.mark = ",")))
+
+# date range of unique transactions in each file
+only_144502 <- setdiff(ot_144502$txn_date, ot_014500$txn_date)
+only_014500 <- setdiff(ot_014500$txn_date, ot_144502$txn_date)
+
+cat("\nSale date range for txn_date only in 144502:\n")
+print(summary(ot_144502$sale_derived_date[ot_144502$txn_date %in% only_144502]))
+
+cat("\nSale date range for txn_date only in 014500:\n")
+print(summary(ot_014500$sale_derived_date[ot_014500$txn_date %in% only_014500]))
+
+cat("\nSample of txn_date only in 144502:\n")
+sub_144502 <- ot_144502[ot_144502$txn_date %in% only_144502, ]
+sub_144502 <- sub_144502[order(sub_144502$clip, sub_144502$sale_derived_date), ]
+print(head(sub_144502, 20))
+
+cat("\nSample of txn_date only in 014500:\n")
+sub_014500 <- ot_014500[ot_014500$txn_date %in% only_014500, ]
+sub_014500 <- sub_014500[order(sub_014500$clip, sub_014500$sale_derived_date), ]
+print(head(sub_014500, 20))
 
 
 # ******************************
-# 9. Close out ----
+# 7. Close out ----
 
 message("Total elapsed: ",
         round(difftime(Sys.time(), start_time, units = "mins"), 2), " minutes")
 
 savehistory(paste0(secure, "Process/Fire Investment/Logs/999_dedup_check_history_", timestamp, ".txt"))
 sink()
+
+
+
+
+
+
+
+

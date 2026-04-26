@@ -1,3 +1,6 @@
+
+NEED TO SOMEHOW SHOW WHEN DROPPING ALL THE OBSERVATIONS IN THE NA SALE CATEGORY, ITS DROPPING NON ARMS LENGTH TRANSACTIONS
+
 Here's what we've discussed as potential sensitivity analyses:
   Investor identification:
   

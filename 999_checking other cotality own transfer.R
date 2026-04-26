@@ -162,6 +162,30 @@ cat("\nSale date histogram by year:\n")
 print(table(format(ot2$sale_derived_date, "%Y"), useNA = "always"))
 
 
+# quick visual of sale date distribution — not saved
+library(ggplot2)
+
+p1 <- ggplot(ot2, aes(x = sale_derived_date)) +
+  geom_histogram(binwidth = 365, fill = "steelblue", color = "white") +
+  scale_x_date(date_breaks = "5 years", date_labels = "%Y") +
+  labs(title = "Sale Date Distribution — owner_transfer_014500 (all dates)",
+       x = "Sale Date", y = "Count") +
+  theme_minimal()
+
+print(p1)
+
+p2 <- ggplot(
+  dplyr::filter(ot2, sale_derived_date >= as.Date("2015-01-01")),
+  aes(x = sale_derived_date)) +
+  geom_histogram(binwidth = 91, fill = "steelblue", color = "white") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(title = "Sale Date Distribution — owner_transfer_014500 (2015+, 3-month bins)",
+       x = "Sale Date", y = "Count") +
+  theme_minimal()
+
+print(p2)
+
+
 # *****************************************************
 # 7. CLIP overlap with 144502 ----
 # *****************************************************
@@ -179,6 +203,10 @@ if (exists("ot")) {
   cat(sprintf("  %.1f%% of 014500 CLIPs also in 144502\n",
               100 * overlap / length(unique(ot2$clip))))
 }
+
+
+
+
 
 
 # *****************************************************
