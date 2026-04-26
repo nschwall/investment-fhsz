@@ -467,3 +467,5 @@ message("Total elapsed: ",
         round(difftime(Sys.time(), start_time, units = "mins"), 2), " minutes")
 
 savehistory(paste0(secure, "Process/Fire Investment/Logs/1-03_property_explore_history_", timestamp, ".txt"))
+
+
