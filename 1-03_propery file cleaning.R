@@ -1,4 +1,5 @@
 
+
 # **************************************************
 #                     DETAILS
 #
@@ -130,65 +131,12 @@ print(names(prop_peek))
 
 
 # *****************************************************
-# 4. Select columns to keep ----
-# *****************************************************
-
-# Raw codebook names — adjust if file header differs from codebook
-keep_cols_prop <- c(
-  "CLIP",
-  "FIPS CODE",
-  "APN (PARCEL NUMBER UNFORMATTED)",
-  "PROPERTY INDICATOR CODE",
-  "SITUS STATE",
-  "SITUS COUNTY",
-  "SITUS CITY",
-  "SITUS ZIP CODE",
-  # Spatial
-  "PARCEL LEVEL LATITUDE",
-  "PARCEL LEVEL LONGITUDE",
-  "BLOCK LEVEL LATITUDE",
-  "BLOCK LEVEL LONGITUDE",
-  # Structure
-  "BUILDING GROSS SQUARE FEET",
-  "BUILDING QUALITY CODE",
-  "BUILDING IMPROVEMENT CONDITION CODE",
-  "BEDROOMS - ALL BUILDINGS",
-  "NUMBER OF BATHROOMS",
-  "YEAR BUILT",
-  "EFFECTIVE YEAR BUILT",
-  "ACRES",
-  # Value
-  "TOTAL VALUE CALCULATED",
-  "ASSESSED TOTAL VALUE",
-  "MARKET TOTAL VALUE",
-  "CALCULATED VALUE SOURCE CODE",
-  # Owner (cross-check)
-  "OWNER 1 FULL NAME",
-  "OWNER 1 CORPORATE INDICATOR",
-  "OWNER OCCUPANCY CODE",
-  # Admin
-  "RECORD ACTION INDICATOR"
-)
-
-raw_names <- names(prop_peek)
-found     <- keep_cols_prop[keep_cols_prop %in% raw_names]
-missing   <- keep_cols_prop[!keep_cols_prop %in% raw_names]
-
-cat(sprintf("\n  Requested columns found: %d / %d\n", length(found), length(keep_cols_prop)))
-if (length(missing) > 0) {
-  cat("  NOT FOUND (adjust keep_cols_prop if needed):\n")
-  cat(paste0("    ", missing, "\n"))
-}
-
-
-# *****************************************************
-# 5. Full load ----
+# 4. Full load ----
 # *****************************************************
 ts("Loading full property file...")
 
 prop <- as.data.frame(data.table::fread(
   f_property,
-  select       = found,
   na.strings   = c("", "NA", "N/A", "null"),
   showProgress = TRUE
 ))
@@ -204,37 +152,37 @@ cat(sprintf("  Columns: %s\n", paste(names(prop), collapse = ", ")))
 gc()
 ts("  gc() done")
 
-# NA count per column — drop any column where >50% of rows are NA
-ts("NA sweep — dropping columns with >50% missing...")
+# Filter to SFR before NA sweep so missingness reflects analytic universe
+ts("Filtering to SFR (property_indicator_code == '10')...")
+
+cat(sprintf("  Rows before SFR filter: %s\n", formatC(nrow(prop), format = "d", big.mark = ",")))
+prop <- prop[!is.na(prop$property_indicator_code) & prop$property_indicator_code == "10", ]
+cat(sprintf("  Rows after SFR filter:  %s\n", formatC(nrow(prop), format = "d", big.mark = ",")))
+
+gc()
+ts("  gc() done")
+
+# NA count per column — informational only, no columns dropped here
+ts("NA sweep...")
 
 na_counts <- sapply(prop, function(x) sum(is.na(x) | x == "" | (is.numeric(x) & x == 0)))
 na_pcts   <- 100 * na_counts / nrow(prop)
 
-cat("\n  NA% per column:\n")
 na_summary <- data.frame(
-  column  = names(na_pcts),
-  n_miss  = na_counts,
+  column   = names(na_pcts),
+  n_miss   = na_counts,
   pct_miss = round(na_pcts, 1),
   row.names = NULL
 )
+
+cat("\n  NA% per column (sorted):\n")
 print(na_summary[order(na_summary$pct_miss, decreasing = TRUE), ], row.names = FALSE)
 
-drop_cols <- names(na_pcts)[na_pcts > 50]
-keep_cols_loaded <- names(na_pcts)[na_pcts <= 50]
-
-if (length(drop_cols) > 0) {
-  cat(sprintf("\n  Dropping %d column(s) with >50%% missing:\n", length(drop_cols)))
-  cat(paste0("    ", drop_cols, "\n"))
-  prop <- prop[, keep_cols_loaded, drop = FALSE]
-} else {
-  cat("\n  No columns exceed 50% missing — nothing dropped.\n")
-}
-
-cat(sprintf("\n  Columns remaining: %d\n", ncol(prop)))
+# No columns dropped here — review output and decide manually which to exclude
 
 
 # *****************************************************
-# 6. CLIP — uniqueness check ----
+# 5. CLIP — uniqueness check ----
 # *****************************************************
 ts("Checking CLIP uniqueness...")
 
@@ -278,7 +226,7 @@ print(head(prop$clip, 20))
 
 
 # *****************************************************
-# 7. California filter ----
+# 6. California filter ----
 # *****************************************************
 ts("Checking California coverage...")
 
@@ -300,7 +248,7 @@ if ("fips_code" %in% names(prop)) {
 
 
 # *****************************************************
-# 8. Property indicator code — SFR check ----
+# 7. Property indicator code — SFR check ----
 # *****************************************************
 ts("Checking property indicator code...")
 
@@ -315,7 +263,7 @@ if ("property_indicator_code" %in% names(prop)) {
 
 
 # *****************************************************
-# 9. Lat/lon coverage ----
+# 8. Lat/lon coverage ----
 # *****************************************************
 ts("Checking lat/lon coverage...")
 
@@ -352,22 +300,36 @@ if (!is.na(p_lat) & !is.na(b_lat)) {
 
 
 # *****************************************************
-# 10. Key analytic variables — missingness ----
+# 9. Key analytic variables — missingness ----
 # *****************************************************
 ts("Missingness sweep: key analytic variables...")
 
+# Columns we expect to keep — review against Section 5 full NA sweep before finalizing
 key_vars <- c(
-  "building_gross_square_feet",
+  "clip",
+  "fips_code",
+  "apn_parcel_number_unformatted",
+  "property_indicator_code",
+  "situs_state",
+  "situs_county",
+  "situs_city",
+  "situs_zip_code",
+  "parcel_level_latitude",
+  "parcel_level_longitude",
+  "building_gross_area_square_feet",
   "building_quality_code",
   "building_improvement_condition_code",
-  "bedrooms_all_buildings",
-  "number_of_bathrooms",
+  "total_number_of_bedrooms_all_buildings",
+  "total_number_of_bathrooms",
   "year_built",
   "effective_year_built",
-  "acres",
-  "total_value_calculated",
+  "total_number_of_acres",
+  "calculated_total_value",
+  "calculated_total_value_source_code",
   "assessed_total_value",
-  "market_total_value"
+  "market_total_value",
+  "owner_occupancy_code",
+  "owner_1_corporate_indicator"
 )
 
 actual_cols <- names(prop)
@@ -376,7 +338,7 @@ for (v in key_vars) {
   col <- actual_cols[grepl(v, actual_cols, fixed = TRUE)]
   if (length(col) == 0) col <- actual_cols[grepl(v, actual_cols, ignore.case = TRUE)]
   if (length(col) == 0) {
-    cat(sprintf("  %-45s  NOT FOUND\n", v))
+    cat(sprintf("  %-50s  NOT FOUND\n", v))
     next
   }
   col   <- col[1]
@@ -387,11 +349,63 @@ for (v in key_vars) {
   } else {
     sum(is.na(vals) | vals == "")
   }
-  cat(sprintf("  %-45s  %s missing (%.1f%%)\n",
+  cat(sprintf("  %-50s  %s missing (%.1f%%)\n",
               col,
               formatC(n_miss, format = "d", big.mark = ","),
               100 * n_miss / nrow(prop)))
 }
+
+# *** STOP HERE — review Section 5 (all columns) and Section 10 (key columns)
+# *** before proceeding. Decide which columns to drop, update keep_cols_slim below.
+
+
+# *****************************************************
+# 10. Subset to analytic columns ----
+# *****************************************************
+ts("Subsetting to analytic columns...")
+
+# TODO: remove any columns from this list based on missingness review above
+keep_cols_slim <- c(
+  "clip",
+  "fips_code",
+  "apn_parcel_number_unformatted",
+  "property_indicator_code",
+  "situs_state",
+  "situs_county",
+  "situs_city",
+  "situs_zip_code",
+  "parcel_level_latitude",
+  "parcel_level_longitude",
+  "building_gross_area_square_feet",
+  "building_quality_code",
+  "building_improvement_condition_code",
+  "total_number_of_bedrooms_all_buildings",
+  "total_number_of_bathrooms",
+  "year_built",
+  "effective_year_built",
+  "total_number_of_acres",
+  "calculated_total_value",
+  "calculated_total_value_source_code",
+  "assessed_total_value",
+  "market_total_value",
+  "owner_occupancy_code",
+  "owner_1_corporate_indicator"
+)
+
+# check all requested cols exist
+missing_slim <- keep_cols_slim[!keep_cols_slim %in% names(prop)]
+if (length(missing_slim) > 0) {
+  cat("  WARNING — columns not found, dropping from keep list:\n")
+  cat(paste0("    ", missing_slim, "\n"))
+  keep_cols_slim <- keep_cols_slim[keep_cols_slim %in% names(prop)]
+}
+
+prop_slim <- prop[, keep_cols_slim, drop = FALSE]
+
+cat(sprintf("  prop_slim: %s rows x %d columns\n",
+            formatC(nrow(prop_slim), format = "d", big.mark = ","),
+            ncol(prop_slim)))
+cat(sprintf("  Columns: %s\n", paste(names(prop_slim), collapse = ", ")))
 
 
 # *****************************************************
@@ -399,9 +413,9 @@ for (v in key_vars) {
 # *****************************************************
 ts("Comparing value fields...")
 
-tv_col <- actual_cols[grepl("total_value_calculated", actual_cols)][1]
-av_col <- actual_cols[grepl("assessed_total_value",   actual_cols)][1]
-mv_col <- actual_cols[grepl("market_total_value",     actual_cols)][1]
+tv_col <- actual_cols[grepl("calculated_total_value$", actual_cols)][1]
+av_col <- actual_cols[grepl("assessed_total_value",    actual_cols)][1]
+mv_col <- actual_cols[grepl("market_total_value",      actual_cols)][1]
 
 if (!is.na(tv_col) & !is.na(av_col) & !is.na(mv_col)) {
   has_tv <- !is.na(prop[[tv_col]]) & prop[[tv_col]] > 0
@@ -421,9 +435,10 @@ if (!is.na(tv_col) & !is.na(av_col) & !is.na(mv_col)) {
   cat(sprintf("  Only market:           %s\n",  formatC(sum(!has_tv & !has_av &  has_mv), format = "d", big.mark = ",")))
   cat(sprintf("  None populated:        %s\n",  formatC(sum(!has_tv & !has_av & !has_mv), format = "d", big.mark = ",")))
   
-  if ("calculated_value_source_code" %in% names(prop)) {
+  src_col <- actual_cols[grepl("calculated_total_value_source_code", actual_cols)][1]
+  if (!is.na(src_col)) {
     cat("\n  Calculated value source (A=Assessed, M=Market, P=Appraised, T=Transitional):\n")
-    print(table(prop$calculated_value_source_code, useNA = "always"))
+    print(table(prop[[src_col]], useNA = "always"))
   }
 }
 
@@ -452,20 +467,34 @@ if (!is.na(tv_col) & !is.na(av_col) & !is.na(mv_col)) {
 # print(table(lubridate::year(ot_clean$sale_derived_date), ot_clean$prop_matched))
 
 
+# *****************************************************
+# 13. Save ----
+# *****************************************************
+ts("Saving SFR property file (slim columns)...")
+
+data_derived <- "Y:/Institutional Investment/Data/Derived/"
+out_path <- paste0(data_derived, "1-03_property_sfr.rds")
+saveRDS(prop_slim, out_path)
+cat(sprintf("  Saved -> %s
+", out_path))
+cat(sprintf("  Rows: %s  |  Columns: %d\n",
+            formatC(nrow(prop_slim), format = "d", big.mark = ","), ncol(prop_slim)))
+
+
 # ******************************
-# 13. Close out ----
+# 14. Close out ----
 
 cat("\n====================================================\n")
 cat("  Decisions needed after reviewing output:\n")
 cat("  1. CLIP unique? If not, resolve (Section 6)\n")
-cat("  2. Parcel vs block lat/lon — see coverage (Section 9)\n")
+cat("  2. Parcel-level lat/lon coverage — see Section 9\n")
 cat("  3. Value field to use — see source code dist (Section 11)\n")
 cat("  4. Run Section 12 join validation once ot_clean available\n")
+cat("  5. Output saved: 1-03_property_sfr.rds\n")
 cat("====================================================\n")
 
 message("Total elapsed: ",
         round(difftime(Sys.time(), start_time, units = "mins"), 2), " minutes")
 
 savehistory(paste0(secure, "Process/Fire Investment/Logs/1-03_property_explore_history_", timestamp, ".txt"))
-
 
