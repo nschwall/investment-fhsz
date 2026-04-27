@@ -1,5 +1,4 @@
 
-
 # **************************************************
 #                     DETAILS
 #
@@ -30,7 +29,7 @@ cat("  1-03_property_explore.R  |  Started:", format(start_time), "\n")
 cat("====================================================\n\n")
 
 # load packages
-pkgs <- c("dplyr", "data.table", "R.utils")
+pkgs <- c("dplyr", "data.table", "R.utils", "magrittr")
 invisible(lapply(pkgs, function(p) {
   if (!require(p, character.only = TRUE)) {
     install.packages(p)
@@ -355,44 +354,143 @@ for (v in key_vars) {
               100 * n_miss / nrow(prop)))
 }
 
-# *** STOP HERE — review Section 5 (all columns) and Section 10 (key columns)
-# *** before proceeding. Decide which columns to drop, update keep_cols_slim below.
+# *** STOP HERE — review Section 5 (all columns) and Section 9 (key columns)
+# *** before proceeding. Decide which columns to drop, update keep_cols_slim in Section 11.
 
 
 # *****************************************************
-# 10. Subset to analytic columns ----
+# 10. Variable cleaning ----
 # *****************************************************
-ts("Subsetting to analytic columns...")
+ts("Variable cleaning...")
 
-# TODO: remove any columns from this list based on missingness review above
+# --- drop list (will be written out in Section 14) ---
+drop_list <- list()
+
+# refresh actual_cols now that prop has been filtered to SFR
+actual_cols <- names(prop)
+
+n_full_load  <- 12556193L
+n_after_sfr  <- nrow(prop)
+drop_list <- c(drop_list, paste0("property3 file: total rows on load (all property types): ", formatC(n_full_load, format = "d", big.mark = ",")))
+drop_list <- c(drop_list, paste0("property3 file: rows after SFR filter (property_indicator_code == '10'): ", formatC(n_after_sfr, format = "d", big.mark = ",")))
+drop_list <- c(drop_list, paste0("property3 file: rows dropped by SFR filter: ", formatC(n_full_load - n_after_sfr, format = "d", big.mark = ",")))
+
+
+# --- year_built: backfill from effective_year_built ---
+cat("  year_built backfill from effective_year_built...\n")
+
+n_yr_backfill <- sum(is.na(prop$year_built) & !is.na(prop$effective_year_built))
+n_yr_neither  <- sum(is.na(prop$year_built) &  is.na(prop$effective_year_built))
+
+prop$yr_built_backfill_flag <- as.integer(is.na(prop$year_built) & !is.na(prop$effective_year_built))
+prop$year_built <- ifelse(is.na(prop$year_built) & !is.na(prop$effective_year_built),
+                          prop$effective_year_built,
+                          prop$year_built)
+
+cat(sprintf("    Backfilled: %s rows\n", formatC(n_yr_backfill, format = "d", big.mark = ",")))
+cat(sprintf("    Still missing after backfill: %s rows\n", formatC(n_yr_neither, format = "d", big.mark = ",")))
+
+drop_list <- c(drop_list, paste0("year_built: backfilled from effective_year_built where year_built missing: ", formatC(n_yr_backfill, format = "d", big.mark = ",")))
+drop_list <- c(drop_list, paste0("year_built: still missing after backfill (neither present): ", formatC(n_yr_neither, format = "d", big.mark = ",")))
+drop_list <- c(drop_list, "yr_built_backfill_flag = 1 indicates year_built was imputed from effective_year_built — use for sensitivity analysis")
+
+
+# --- lat/lon: backfill parcel-level from block-level ---
+cat("  lat/lon backfill from block-level where parcel missing...\n")
+
+n_lat_backfill <- sum(is.na(prop$parcel_level_latitude) & !is.na(prop$block_level_latitude))
+n_lat_neither  <- sum(is.na(prop$parcel_level_latitude) &  is.na(prop$block_level_latitude))
+
+prop$latlon_backfill_flag <- as.integer(is.na(prop$parcel_level_latitude) & !is.na(prop$block_level_latitude))
+prop$parcel_level_latitude  <- ifelse(is.na(prop$parcel_level_latitude)  & !is.na(prop$block_level_latitude),
+                                      prop$block_level_latitude,  prop$parcel_level_latitude)
+prop$parcel_level_longitude <- ifelse(is.na(prop$parcel_level_longitude) & !is.na(prop$block_level_longitude),
+                                      prop$block_level_longitude, prop$parcel_level_longitude)
+
+cat(sprintf("    Backfilled: %s rows\n", formatC(n_lat_backfill, format = "d", big.mark = ",")))
+cat(sprintf("    Still missing after backfill: %s rows\n", formatC(n_lat_neither, format = "d", big.mark = ",")))
+
+drop_list <- c(drop_list, paste0("lat/lon: parcel-level backfilled from block-level where parcel missing: ", formatC(n_lat_backfill, format = "d", big.mark = ",")))
+drop_list <- c(drop_list, paste0("lat/lon: still missing after backfill (neither parcel nor block present): ", formatC(n_lat_neither, format = "d", big.mark = ",")))
+drop_list <- c(drop_list, "latlon_backfill_flag = 1 indicates lat/lon imputed from block-level — use for sensitivity analysis")
+
+
+# --- manufactured_home_indicator: recode Y/NA to 1/0 ---
+cat("  Recoding manufactured_home_indicator...\n")
+
+n_manuf_y  <- sum(prop$manufactured_home_indicator == "Y", na.rm = TRUE)
+n_manuf_na <- sum(is.na(prop$manufactured_home_indicator) | prop$manufactured_home_indicator == "")
+
+prop$manufactured_home <- as.integer(!is.na(prop$manufactured_home_indicator) & prop$manufactured_home_indicator == "Y")
+
+cat(sprintf("    Y -> 1: %s rows\n", formatC(n_manuf_y,  format = "d", big.mark = ",")))
+cat(sprintf("    NA -> 0: %s rows (assumption: NA = not a manufactured home)\n", formatC(n_manuf_na, format = "d", big.mark = ",")))
+
+drop_list <- c(drop_list, paste0("manufactured_home_indicator: Y recoded to 1: ", formatC(n_manuf_y, format = "d", big.mark = ",")))
+drop_list <- c(drop_list, paste0("manufactured_home_indicator: NA recoded to 0 (assumption: NA = not manufactured): ", formatC(n_manuf_na, format = "d", big.mark = ",")))
+
+
+# --- homestead_exempt_indicator: recode Y/NA to 1/0 ---
+cat("  Recoding homestead_exempt_indicator...\n")
+
+n_homest_y  <- sum(prop$homestead_exempt_indicator == "Y", na.rm = TRUE)
+n_homest_na <- sum(is.na(prop$homestead_exempt_indicator) | prop$homestead_exempt_indicator == "")
+
+prop$homestead_exempt <- as.integer(!is.na(prop$homestead_exempt_indicator) & prop$homestead_exempt_indicator == "Y")
+
+cat(sprintf("    Y -> 1: %s rows\n", formatC(n_homest_y,  format = "d", big.mark = ",")))
+cat(sprintf("    NA -> 0: %s rows (assumption: NA = no exemption)\n", formatC(n_homest_na, format = "d", big.mark = ",")))
+
+drop_list <- c(drop_list, paste0("homestead_exempt_indicator: Y recoded to 1: ", formatC(n_homest_y, format = "d", big.mark = ",")))
+drop_list <- c(drop_list, paste0("homestead_exempt_indicator: NA recoded to 0 (assumption: NA = no exemption): ", formatC(n_homest_na, format = "d", big.mark = ",")))
+
+gc()
+ts("  gc() done")
+
+
+# *****************************************************
+# 11. Subset to analytic columns and rename ----
+# *****************************************************
+ts("Subsetting and renaming analytic columns...")
+
 keep_cols_slim <- c(
+  # ID / join keys
   "clip",
   "fips_code",
   "apn_parcel_number_unformatted",
+  # Property type
   "property_indicator_code",
+  "manufactured_home",
+  # Geography
   "situs_state",
   "situs_county",
   "situs_city",
   "situs_zip_code",
+  "municipality_name",
+  # Spatial
   "parcel_level_latitude",
   "parcel_level_longitude",
-  "building_gross_area_square_feet",
+  "latlon_backfill_flag",
+  # Structure
+  "total_living_area_square_feet_all_buildings",
   "building_quality_code",
-  "building_improvement_condition_code",
+  "construction_type_code",
   "total_number_of_bedrooms_all_buildings",
-  "total_number_of_bathrooms",
+  "total_number_of_bathrooms_all_buildings",
+  "total_number_of_stories",
   "year_built",
-  "effective_year_built",
+  "yr_built_backfill_flag",
   "total_number_of_acres",
+  # Value
   "calculated_total_value",
   "calculated_total_value_source_code",
   "assessed_total_value",
-  "market_total_value",
+  # Owner
   "owner_occupancy_code",
-  "owner_1_corporate_indicator"
+  "homestead_exempt"
 )
 
-# check all requested cols exist
+# check all exist
 missing_slim <- keep_cols_slim[!keep_cols_slim %in% names(prop)]
 if (length(missing_slim) > 0) {
   cat("  WARNING — columns not found, dropping from keep list:\n")
@@ -402,6 +500,36 @@ if (length(missing_slim) > 0) {
 
 prop_slim <- prop[, keep_cols_slim, drop = FALSE]
 
+# rename to short clean names
+prop_slim <- prop_slim %>%
+  dplyr::rename(
+    apn              = apn_parcel_number_unformatted,
+    prop_type        = property_indicator_code,
+    manuf_home       = manufactured_home,
+    state            = situs_state,
+    county           = situs_county,
+    city             = situs_city,
+    zip              = situs_zip_code,
+    municipality     = municipality_name,
+    lat              = parcel_level_latitude,
+    lon              = parcel_level_longitude,
+    latlon_backfill  = latlon_backfill_flag,
+    sqft_living      = total_living_area_square_feet_all_buildings,
+    bldg_quality     = building_quality_code,
+    const_type       = construction_type_code,
+    bdrms            = total_number_of_bedrooms_all_buildings,
+    baths            = total_number_of_bathrooms_all_buildings,
+    stories          = total_number_of_stories,
+    yr_built         = year_built,
+    yr_built_backfill = yr_built_backfill_flag,
+    acres            = total_number_of_acres,
+    value_calc       = calculated_total_value,
+    value_calc_src   = calculated_total_value_source_code,
+    value_assessed   = assessed_total_value,
+    occ_code         = owner_occupancy_code,
+    homestead        = homestead_exempt
+  )
+
 cat(sprintf("  prop_slim: %s rows x %d columns\n",
             formatC(nrow(prop_slim), format = "d", big.mark = ","),
             ncol(prop_slim)))
@@ -409,7 +537,7 @@ cat(sprintf("  Columns: %s\n", paste(names(prop_slim), collapse = ", ")))
 
 
 # *****************************************************
-# 11. Value field comparison ----
+# 12. Value field comparison ----
 # *****************************************************
 ts("Comparing value fields...")
 
@@ -444,7 +572,7 @@ if (!is.na(tv_col) & !is.na(av_col) & !is.na(mv_col)) {
 
 
 # *****************************************************
-# 12. Join validation to OwnerTransfer 014500 ----
+# 13. Join validation to OwnerTransfer 014500 ----
 # *****************************************************
 
 # TODO: uncomment once ot_clean is available from 1-02
@@ -468,28 +596,37 @@ if (!is.na(tv_col) & !is.na(av_col) & !is.na(mv_col)) {
 
 
 # *****************************************************
-# 13. Save ----
+# 14. Save ----
 # *****************************************************
-ts("Saving SFR property file (slim columns)...")
+ts("Saving SFR property file and notes list...")
 
+# save analytic file
 data_derived <- "Y:/Institutional Investment/Data/Derived/"
 out_path <- paste0(data_derived, "1-03_property_sfr.rds")
 saveRDS(prop_slim, out_path)
-cat(sprintf("  Saved -> %s
-", out_path))
+cat(sprintf("  Data saved -> %s\n", out_path))
 cat(sprintf("  Rows: %s  |  Columns: %d\n",
             formatC(nrow(prop_slim), format = "d", big.mark = ","), ncol(prop_slim)))
 
+# save notes / drop list
+drop_list_path <- paste0(
+  "C:/Users/Nora Schwaller/Dropbox (Personal)/Fire Investment/Process/Drop List/",
+  "1-03_notes.txt"
+)
+writeLines(as.character(drop_list), drop_list_path)
+cat(sprintf("  Notes list saved -> %s\n", drop_list_path))
+print(drop_list)
+
 
 # ******************************
-# 14. Close out ----
+# 15. Close out ----
 
 cat("\n====================================================\n")
 cat("  Decisions needed after reviewing output:\n")
-cat("  1. CLIP unique? If not, resolve (Section 6)\n")
-cat("  2. Parcel-level lat/lon coverage — see Section 9\n")
-cat("  3. Value field to use — see source code dist (Section 11)\n")
-cat("  4. Run Section 12 join validation once ot_clean available\n")
+cat("  1. CLIP unique? If not, resolve (Section 5)\n")
+cat("  2. Parcel-level lat/lon coverage — see Section 8\n")
+cat("  3. Value field to use — see source code dist (Section 12)\n")
+cat("  4. Run Section 13 join validation once ot_clean available\n")
 cat("  5. Output saved: 1-03_property_sfr.rds\n")
 cat("====================================================\n")
 
@@ -497,4 +634,6 @@ message("Total elapsed: ",
         round(difftime(Sys.time(), start_time, units = "mins"), 2), " minutes")
 
 savehistory(paste0(secure, "Process/Fire Investment/Logs/1-03_property_explore_history_", timestamp, ".txt"))
+
+
 
