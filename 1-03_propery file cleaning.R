@@ -1,4 +1,5 @@
 
+
 # **************************************************
 #                     DETAILS
 #
@@ -481,10 +482,9 @@ keep_cols_slim <- c(
   "year_built",
   "yr_built_backfill_flag",
   "total_number_of_acres",
-  # Value
+  # Value — calculated_total_value == assessed_total_value for all CA (source 100% A)
   "calculated_total_value",
   "calculated_total_value_source_code",
-  "assessed_total_value",
   # Owner
   "owner_occupancy_code",
   "homestead_exempt"
@@ -525,7 +525,6 @@ prop_slim <- prop_slim %>%
     acres            = total_number_of_acres,
     value_calc       = calculated_total_value,
     value_calc_src   = calculated_total_value_source_code,
-    value_assessed   = assessed_total_value,
     occ_code         = owner_occupancy_code,
     homestead        = homestead_exempt
   )
@@ -634,6 +633,5 @@ message("Total elapsed: ",
         round(difftime(Sys.time(), start_time, units = "mins"), 2), " minutes")
 
 savehistory(paste0(secure, "Process/Fire Investment/Logs/1-03_property_explore_history_", timestamp, ".txt"))
-
 
 
