@@ -1,5 +1,4 @@
 
-
 # **************************************************
 #                     DETAILS
 #
@@ -20,6 +19,7 @@ user   <- "C:/Users/Nora Schwaller/Dropbox (Personal)/"
 root   <- paste0(user, "Fire Investment/")
 secure <- "Y:/Institutional Investment/"
 
+data_output_s <- paste0(secure, "Data/Derived/Fire Investment/")
 data_input_s  <- paste0(secure, "Data/Source/")
 transfer_root <- paste0(data_input_s, "Cotality/September 2025 Transfer")
 
@@ -460,13 +460,13 @@ keep_cols_slim <- c(
   "fips_code",
   "apn_parcel_number_unformatted",
   # Property type
-  "property_indicator_code",
   "manufactured_home",
   # Geography
   "situs_state",
   "situs_county",
   "situs_city",
   "situs_zip_code",
+  "situs_street_address",
   "municipality_name",
   # Spatial
   "parcel_level_latitude",
@@ -504,12 +504,12 @@ prop_slim <- prop[, keep_cols_slim, drop = FALSE]
 prop_slim <- prop_slim %>%
   dplyr::rename(
     apn              = apn_parcel_number_unformatted,
-    prop_type        = property_indicator_code,
     manuf_home       = manufactured_home,
     state            = situs_state,
     county           = situs_county,
     city             = situs_city,
     zip              = situs_zip_code,
+    situs_addr       = situs_street_address,
     municipality     = municipality_name,
     lat              = parcel_level_latitude,
     lon              = parcel_level_longitude,
@@ -600,8 +600,7 @@ if (!is.na(tv_col) & !is.na(av_col) & !is.na(mv_col)) {
 ts("Saving SFR property file and notes list...")
 
 # save analytic file
-data_derived <- "Y:/Institutional Investment/Data/Derived/"
-out_path <- paste0(data_derived, "1-03_property_sfr.rds")
+out_path <- paste0(data_output_s, "1-03_property_sfr.rds")
 saveRDS(prop_slim, out_path)
 cat(sprintf("  Data saved -> %s\n", out_path))
 cat(sprintf("  Rows: %s  |  Columns: %d\n",
