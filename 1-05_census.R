@@ -1,3 +1,5 @@
+
+
 # **************************************************
 #                     DETAILS
 #
@@ -43,6 +45,8 @@
 #
 #   pct_renter     = renter_occ / total_occ * 100
 #   vacancy_rate   = vacant / total_units * 100
+#   area_km2       = polygon area in km² (from CA Albers geometry, EPSG:3310)
+#   pop_density    = total_pop / area_km2  (persons per km²)
 #
 # ---- SPATIAL JOIN DESIGN ----
 #
@@ -52,7 +56,9 @@
 #   returned by tidycensus) to CA Albers (EPSG:3310) for accurate
 #   point-in-polygon join. Source CRS and bounding box both verified at runtime.
 #   st_within used (not st_intersects) to avoid duplicate matches on shared
-#   BG boundaries. Properties outside any polygon receive NA GEOID.
+#   BG boundaries. Rows missing lat/lon (corrupt CLIPs from 1-04) are dropped
+#   here -- fix source in 1-02/1-03. 1-05_analytic.rds is the spatially-
+#   complete subset of 1-04_analytic.rds; similarly for prop_wide.
 #
 # ---- OUTPUTS ----
 #
@@ -307,11 +313,15 @@ bg <- bg_raw %>%
                                   NA_real_)
   )
 
+# area_km2 and pop_density are computed in Section 6 after reprojection
+# to CA Albers (EPSG:3310), where st_area() returns accurate metre-based areas.
+
 cat(sprintf("  bg rows: %s  |  columns: %d\n",
             formatC(nrow(bg), format = "d", big.mark = ","), ncol(bg)))
 
 key_est <- c("median_gross_rent", "median_housing_value", "median_hh_income",
              "total_pop", "pct_renter", "vacancy_rate")
+# Note: pop_density NA audit runs in Section 6 after CA Albers reprojection
 cat("\n  NA counts on key estimates (BG level):\n")
 for (v in key_est) {
   n_na <- sum(is.na(sf::st_drop_geometry(bg)[[v]]))
@@ -323,7 +333,7 @@ for (v in key_est) {
 rm(key_est)
 
 drop_list <- c(drop_list,
-               "BG-level derived variables created: pct_renter, vacancy_rate",
+               "BG-level derived variables created: pct_renter, vacancy_rate, area_km2, pop_density (computed in Section 6 on CA Albers geometry)",
                "MOEs dropped (not used in analysis)"
 )
 
@@ -355,6 +365,40 @@ if (!isTRUE(bg_crs_raw$epsg == 4269)) {
 # Using a projected CRS avoids angular distortion of NAD83 for
 # point-in-polygon operations, particularly near polygon edges.
 bg_3310 <- sf::st_transform(bg, crs = 3310)
+
+# Compute area and population density on the projected geometry.
+# st_area() requires a projected CRS for accurate results -- CA Albers metres
+# give area in m²; divide by 1e6 for km². Computed on bg_3310 then mirrored
+# back to bg so both objects stay in sync.
+area_km2_vec <- as.numeric(sf::st_area(bg_3310)) / 1e6
+
+bg <- bg %>%
+  dplyr::mutate(
+    area_km2    = area_km2_vec,
+    pop_density = dplyr::if_else(area_km2 > 0,
+                                 total_pop / area_km2,
+                                 NA_real_)
+  )
+
+bg_3310 <- bg_3310 %>%
+  dplyr::mutate(
+    area_km2    = area_km2_vec,
+    pop_density = dplyr::if_else(area_km2 > 0,
+                                 total_pop / area_km2,
+                                 NA_real_)
+  )
+
+cat(sprintf("  area_km2 range: %.3f to %.1f km²\n",
+            min(bg$area_km2, na.rm = TRUE), max(bg$area_km2, na.rm = TRUE)))
+cat(sprintf("  pop_density range: %.2f to %.1f persons/km²\n",
+            min(bg$pop_density, na.rm = TRUE), max(bg$pop_density, na.rm = TRUE)))
+n_zero_area <- sum(bg$area_km2 == 0, na.rm = TRUE)
+n_na_density <- sum(is.na(bg$pop_density))
+cat(sprintf("  pop_density NA: %d  (zero-area polygons: %d)\n",
+            n_na_density, n_zero_area))
+if (n_zero_area > 0) warning(sprintf(
+  "%d BG polygons have zero area -- pop_density will be NA for these.", n_zero_area))
+rm(area_km2_vec, n_zero_area, n_na_density)
 
 bg_crs_3310 <- sf::st_crs(bg_3310)
 cat(sprintf("  Transformed BG CRS: EPSG:%s  |  %s\n",
@@ -407,7 +451,8 @@ bg_slim_cols <- c("geoid", "bg_name",
                   "total_pop", "total_occ", "renter_occ", "owner_occ",
                   "total_units", "vacant",
                   "median_housing_value", "median_hh_income",
-                  "pct_renter", "vacancy_rate")
+                  "pct_renter", "vacancy_rate",
+                  "area_km2", "pop_density")
 bg_slim <- bg_3310[, bg_slim_cols]
 
 dir.create(paste0(root, "Process/Images"), showWarnings = FALSE, recursive = TRUE)
@@ -461,23 +506,26 @@ cat(sprintf("  Unmatched analytic plot saved.\n"))
 
 rm(analytic_pts, analytic_join, unmatched_pts_a, plot_sample_a, n_unmatched_a)
 
-# Rows missing lat/lon were not passed to spatial join; re-attach with NA GEOID
+# Drop rows missing lat/lon -- spatially unplaceable (corrupt CLIPs from 1-04).
+# These rows were never passed to the spatial join and will never get a GEOID.
+# TODO: fix source coordinates in 1-02/1-03 and re-run.
+# 1-05_analytic.rds is therefore the spatially-complete subset of 1-04_analytic.rds.
 if (n_analytic_no_ll > 0) {
-  missing_ll_rows <- analytic[is.na(analytic$lat) | is.na(analytic$lon), ]
-  for (col in bg_slim_cols) missing_ll_rows[[col]] <- NA
-  analytic_bg <- dplyr::bind_rows(analytic_bg, missing_ll_rows)
-  cat(sprintf("  Re-attached %s rows missing lat/lon with NA GEOID.\n",
+  analytic_bg <- analytic_bg[!is.na(analytic_bg$lat) & !is.na(analytic_bg$lon), ]
+  cat(sprintf("  Dropped %s rows missing lat/lon (spatially unplaceable).\n",
               formatC(n_analytic_no_ll, format = "d", big.mark = ",")))
-  rm(missing_ll_rows)
 }
 
-drop_list <- c(drop_list, sprintf(
-  "analytic spatial join: %s of %s rows matched to a BG GEOID (%.2f%%)",
-  formatC(n_analytic_matched, format = "d", big.mark = ","),
-  formatC(n_analytic_total,   format = "d", big.mark = ","),
-  100 * n_analytic_matched / max(n_analytic_valid, 1)
-))
+drop_list <- c(drop_list,
+               sprintf("analytic spatial join: %s of %s rows matched to a BG GEOID (%.2f%%)",
+                       formatC(n_analytic_matched, format = "d", big.mark = ","),
+                       formatC(n_analytic_total,   format = "d", big.mark = ","),
+                       100 * n_analytic_matched / max(n_analytic_valid, 1)),
+               sprintf("analytic: dropped %s rows missing lat/lon -- fix source coords in 1-02/1-03",
+                       formatC(n_analytic_no_ll, format = "d", big.mark = ","))
+)
 
+n_analytic_dropped <- n_analytic_no_ll   # saved for stopifnot in Section 9
 rm(n_analytic_total, n_analytic_valid, n_analytic_no_ll, n_analytic_matched)
 
 
@@ -529,22 +577,23 @@ cat("  Unmatched prop_wide plot saved.\n")
 
 rm(prop_pts, prop_join, unmatched_pts_p, plot_sample_p, n_unmatched_p)
 
+# Drop rows missing lat/lon -- same rationale as analytic above.
 if (n_prop_no_ll > 0) {
-  missing_ll_rows_p <- prop_wide[is.na(prop_wide$lat) | is.na(prop_wide$lon), ]
-  for (col in bg_slim_cols) missing_ll_rows_p[[col]] <- NA
-  prop_bg <- dplyr::bind_rows(prop_bg, missing_ll_rows_p)
-  cat(sprintf("  Re-attached %s prop_wide rows missing lat/lon with NA GEOID.\n",
+  prop_bg <- prop_bg[!is.na(prop_bg$lat) & !is.na(prop_bg$lon), ]
+  cat(sprintf("  Dropped %s rows missing lat/lon (spatially unplaceable).\n",
               formatC(n_prop_no_ll, format = "d", big.mark = ",")))
-  rm(missing_ll_rows_p)
 }
 
-drop_list <- c(drop_list, sprintf(
-  "prop_wide spatial join: %s of %s rows matched to a BG GEOID (%.2f%%)",
-  formatC(n_prop_matched, format = "d", big.mark = ","),
-  formatC(n_prop_total,   format = "d", big.mark = ","),
-  100 * n_prop_matched / max(n_prop_valid, 1)
-))
+drop_list <- c(drop_list,
+               sprintf("prop_wide spatial join: %s of %s rows matched to a BG GEOID (%.2f%%)",
+                       formatC(n_prop_matched, format = "d", big.mark = ","),
+                       formatC(n_prop_total,   format = "d", big.mark = ","),
+                       100 * n_prop_matched / max(n_prop_valid, 1)),
+               sprintf("prop_wide: dropped %s rows missing lat/lon -- fix source coords in 1-02/1-03",
+                       formatC(n_prop_no_ll, format = "d", big.mark = ","))
+)
 
+n_prop_dropped <- n_prop_no_ll   # saved for stopifnot in Section 9
 rm(n_prop_total, n_prop_valid, n_prop_no_ll, n_prop_matched)
 
 
@@ -560,19 +609,28 @@ cat(sprintf("  GEOID length check (analytic): min=%d max=%d (expected 12)\n",
 if (any(geoid_lengths != 12)) warning("  !!! Some GEOIDs are not 12 characters -- investigate.")
 rm(geoid_lengths)
 
-cat("\n  median_hh_income distribution (analytic, matched rows):\n")
-print(summary(analytic_bg$median_hh_income[!is.na(analytic_bg$geoid)]))
+cat("\n  median_hh_income distribution (analytic):\n")
+print(summary(analytic_bg$median_hh_income))
 
-cat("\n  pct_renter distribution (analytic, matched rows):\n")
-print(summary(analytic_bg$pct_renter[!is.na(analytic_bg$geoid)]))
+cat("\n  pct_renter distribution (analytic):\n")
+print(summary(analytic_bg$pct_renter))
 
-cat("\n  vacancy_rate distribution (analytic, matched rows):\n")
-print(summary(analytic_bg$vacancy_rate[!is.na(analytic_bg$geoid)]))
+cat("\n  vacancy_rate distribution (analytic):\n")
+print(summary(analytic_bg$vacancy_rate))
 
-# Row counts must be unchanged -- spatial join must not add or drop rows
-stopifnot(nrow(analytic_bg) == nrow(analytic))
-stopifnot(nrow(prop_bg)     == nrow(prop_wide))
-cat("\n  Row count check passed: analytic and prop_wide unchanged.\n")
+# Row counts: analytic_bg and prop_bg are smaller than their sources by the
+# number of dropped missing-coord rows. Verify the difference is exactly that.
+stopifnot(nrow(analytic_bg) == nrow(analytic)  - n_analytic_dropped)
+stopifnot(nrow(prop_bg)     == nrow(prop_wide) - n_prop_dropped)
+cat(sprintf("\n  Row count check passed: analytic %s -> %s (-%s missing coord)\n",
+            formatC(nrow(analytic),  format = "d", big.mark = ","),
+            formatC(nrow(analytic_bg), format = "d", big.mark = ","),
+            formatC(n_analytic_dropped, format = "d", big.mark = ",")))
+cat(sprintf("  Row count check passed: prop_wide %s -> %s (-%s missing coord)\n",
+            formatC(nrow(prop_wide), format = "d", big.mark = ","),
+            formatC(nrow(prop_bg),   format = "d", big.mark = ","),
+            formatC(n_prop_dropped,  format = "d", big.mark = ",")))
+rm(n_analytic_dropped, n_prop_dropped)
 
 
 
@@ -594,7 +652,7 @@ ts("Corporate buyer BG-level summary stats (Section 10)...")
 
 # Restrict to matched rows with non-missing buy1_corp
 corp_df <- analytic_bg[
-  !is.na(analytic_bg$geoid) & !is.na(analytic_bg$buy1_corp),
+  !is.na(analytic_bg$buy1_corp),   # all rows now have a GEOID
 ]
 
 n_corp    <- sum(corp_df$buy1_corp == 1L)
@@ -610,7 +668,7 @@ bg_context_vars <- c(
   "median_hh_income",
   "pct_renter",
   "vacancy_rate",
-  "total_pop"
+  "pop_density"
 )
 
 # Cohen's d on ranks (robust to outliers/skew)
@@ -688,13 +746,13 @@ drop_list <- c(drop_list, sprintf(
 # Sample non-corporate rows to keep plot rendering manageable
 set.seed(123)
 plot_vars  <- c("median_gross_rent", "median_housing_value",
-                "median_hh_income",  "pct_renter", "vacancy_rate")
+                "median_hh_income",  "pct_renter", "pop_density")
 plot_labels <- c(
   median_gross_rent    = "Median Gross Rent ($)",
   median_housing_value = "Median Housing Value ($)",
   median_hh_income     = "Median HH Income ($)",
   pct_renter           = "% Renter-Occupied",
-  vacancy_rate         = "Vacancy Rate (%)"
+  pop_density          = "Pop. Density (persons/km²)"
 )
 
 n_sample     <- min(n_noncorp, 50000L)
@@ -746,7 +804,7 @@ rm(corp_df, corp_plot_df, corp_stats, p_box,
 # *****************************************************
 ts("Generating income distribution plot...")
 
-bg_in_analytic <- unique(analytic_bg$geoid[!is.na(analytic_bg$geoid)])
+bg_in_analytic <- unique(analytic_bg$geoid)  # all rows have GEOID after Section 7 drop
 bg_plot <- sf::st_drop_geometry(bg) %>%
   dplyr::mutate(in_analytic = geoid %in% bg_in_analytic)
 
@@ -820,9 +878,13 @@ cat("     1-05_unmatched_prop_wide.png. Random scatter = coordinate noise,\n")
 cat("     spatial clustering = bad data batch or offshore/border coords.\n")
 cat("  4. GEOID match rate -- low rates indicate lat/lon errors in the property\n")
 cat("     file. Investigate with 999 file.\n")
-cat("  5. NA rates on BG variables -- suppressed cells in sparse BGs are\n")
+cat("  5. Corporate buyer summary (Section 10) -- read Cohen's d, not just\n")
+cat("     p-values. With 2M+ rows everything will be significant. d > 0.2\n")
+cat("     is worth flagging; d > 0.5 is substantively large.\n")
+cat("     Check 1-05_corp_bg_context.png for visual distribution.\n")
+cat("  6. NA rates on BG variables -- suppressed cells in sparse BGs are\n")
 cat("     expected for medians. Consider tract-level fallback in analysis.\n")
-cat("  6. Outputs:\n")
+cat("  7. Outputs:\n")
 cat("       1-05_bg_acs.rds     -- BG-level contextual file (CA, ACS 2020)\n")
 cat("       1-05_analytic.rds   -- analytic + GEOID + BG context\n")
 cat("       1-05_prop_wide.rds  -- prop_wide + GEOID + BG context\n")
