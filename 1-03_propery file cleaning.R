@@ -22,7 +22,7 @@ secure <- "Y:/Institutional Investment/"
 
 data_output_s <- paste0(secure, "Data/Derived/Fire Investment/")
 data_input_s  <- paste0(secure, "Data/Source/")
-transfer_root <- paste0(data_input_s, "Cotality/September 2025 Transfer")
+transfer_root <- paste0(data_input_s, "Cotality/March 2026 Transfer")
 
 start_time <- Sys.time()
 
@@ -44,7 +44,6 @@ rm(pkgs)
 timestamp <- format(Sys.time(), "%Y-%m-%d_%H-%M")
 log_file  <- paste0(secure, "Process/Fire Investment/Logs/1-03_property_explore_", timestamp, ".txt")
 sink(log_file, split = TRUE)
-on.exit(sink(), add = TRUE)
 
 ts <- function(label = "") {
   cat(sprintf("\n[%s]  %s\n", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), label))
@@ -104,12 +103,13 @@ csv_all <- unlist(lapply(subdirs, function(d) {
              full.names = TRUE, recursive = TRUE, ignore.case = TRUE)
 }))
 csv_property <- csv_all[grepl("property3", csv_all, ignore.case = TRUE)]
+csv_property <- csv_property[!grepl("hist_", csv_property, ignore.case = TRUE)]
 
 cat(sprintf("\nProperty3 CSV(s) found (%d):\n", length(csv_property)))
 cat(paste0("  ", basename(csv_property), "\n"))
 
 if (length(csv_property) == 0) stop("No property3 CSV found — check transfer_root path.")
-if (length(csv_property) > 1) warning("Multiple property3 files found — using first. Confirm this is correct.")
+if (length(csv_property) > 1)  stop("Multiple non-hist property3 files found — check transfer_root path.")
 f_property <- csv_property[1]
 cat(sprintf("\nUsing: %s\n", basename(f_property)))
 
@@ -371,7 +371,7 @@ drop_list <- list()
 # refresh actual_cols now that prop has been filtered to SFR
 actual_cols <- names(prop)
 
-n_full_load  <- 12556193L
+n_full_load <- nrow(prop)
 n_after_sfr  <- nrow(prop)
 drop_list <- c(drop_list, paste0("property3 file: total rows on load (all property types): ", formatC(n_full_load, format = "d", big.mark = ",")))
 drop_list <- c(drop_list, paste0("property3 file: rows after SFR filter (property_indicator_code == '10'): ", formatC(n_after_sfr, format = "d", big.mark = ",")))
@@ -631,6 +631,8 @@ cat("====================================================\n")
 
 message("Total elapsed: ",
         round(difftime(Sys.time(), start_time, units = "mins"), 2), " minutes")
+
+sink()
 
 savehistory(paste0(secure, "Process/Fire Investment/Logs/1-03_property_explore_history_", timestamp, ".txt"))
 

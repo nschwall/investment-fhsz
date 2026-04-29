@@ -1,4 +1,5 @@
 
+FIX DROP FOR NA LAT LONG --- CURRENTLY IN 1-05... SHOULD BE HERE!
 
 # **************************************************
 #                     DETAILS
@@ -30,9 +31,10 @@
 #
 # ---- OT COLUMNS DROPPED BEFORE JOIN ----
 #
-#   fips, apn_unformatted, mobile_home, prop_indicator, residential
+#   fips, apn_unformatted, prop_indicator, residential
 #   — all duplicated by the property file, which is the canonical source.
 #     Property versions are kept; OT versions dropped before joining.
+#   mobile_home retained — distinct from manuf_home (property file).
 #
 # ---- OUTPUTS ----
 #
@@ -171,14 +173,17 @@ rm(n_ot_clips, n_prop_clips, n_matched, n_unmatched, pct_matched)
 #   OT column        Property column    Notes
 #   fips             fips_code          same field, different name
 #   apn_unformatted  apn                same field, different name
-#   mobile_home      manuf_home         same concept, recoded in 1-03
 #   prop_indicator   (prop file = SFR only, already filtered)
 #   residential      (prop file = SFR only, already filtered)
+#
+#   NOTE: mobile_home (OT) and manuf_home (property) are DISTINCT concepts
+#   and are both retained. mobile_home = pre-1976 HUD code; manuf_home =
+#   post-1976 HUD code. Do not conflate.
 #   bldg_count       (not in prop_slim — retain from OT if present)
 # *****************************************************
 ts("Dropping OT columns superseded by property file...")
 
-ot_drop <- c("fips", "apn_unformatted", "mobile_home", "prop_indicator", "residential")
+ot_drop <- c("fips", "apn_unformatted", "prop_indicator", "residential")
 ot_drop <- intersect(ot_drop, names(ot))   # only drop what actually exists
 
 cat(sprintf("  Dropping from OT (%d): %s\n", length(ot_drop), paste(ot_drop, collapse = ", ")))
@@ -272,12 +277,23 @@ if (n_prop_unmatched > 0) {
   unmatched_df <- data.frame()   # empty placeholder so downstream code can reference it safely
 }
 
+n_unique_unmatched   <- length(unique(analytic$clip_id[analytic$prop_matched == 0L]))
+n_unique_ot          <- length(unique(analytic$clip_id))
+pct_unique_unmatched <- round(100 * n_unique_unmatched / n_unique_ot, 2)
+
+cat(sprintf("  Unique OT CLIPs unmatched: %s of %s (%.2f%%)\n",
+            formatC(n_unique_unmatched, format = "d", big.mark = ","),
+            formatC(n_unique_ot,        format = "d", big.mark = ","),
+            pct_unique_unmatched))
+
 rm(ot_clips, prop_clips, unmatched_clips)
 
 drop_list <- c(drop_list, sprintf(
-  "post-join: rows with property match: %s (%.2f%%) | unmatched (INVESTIGATE if > 0): %s (%.2f%%)",
-  formatC(n_prop_matched,   format = "d", big.mark = ","), pct_matched_rows,
-  formatC(n_prop_unmatched, format = "d", big.mark = ","), 100 - pct_matched_rows
+  "post-join rows unmatched: %s (%.2f%%) | unique CLIPs unmatched: %s of %s (%.2f%%) — INVESTIGATE if > 0",
+  formatC(n_prop_unmatched,   format = "d", big.mark = ","), 100 - pct_matched_rows,
+  formatC(n_unique_unmatched, format = "d", big.mark = ","),
+  formatC(n_unique_ot,        format = "d", big.mark = ","),
+  pct_unique_unmatched
 ))
 
 # Distribution of key property fields post-join — distinguish join miss vs true missingness
@@ -296,8 +312,10 @@ for (col in prop_key_cols) {
 }
 rm(matched_rows)
 
-
-# *****************************************************
+# buy1_corp rate: matched vs unmatched — check for systematic bias in corporate sample
+cat("\n  buy1_corp rate: matched vs unmatched rows:\n")
+print(prop.table(table(analytic$buy1_corp, analytic$prop_matched,
+                       dnn = c("buy1_corp", "prop_matched")), margin = 2))# *****************************************************
 # 7. Quick checks — analytic file ----
 # *****************************************************
 ts("Quick checks on joined analytic file...")
@@ -344,22 +362,125 @@ message("Elapsed so far: ",
 
 
 # *****************************************************
-# 8. Save ----
+# 8. Build property-wide file ----
 # *****************************************************
-ts("Saving joined analytic file...")
+# One row per property (clip). clip + lat + lon from prop_slim,
+# plus wide transaction history: transactN_sale_date, transactN_sale_amt, transactN_buy1_corp.
+# Use for: block-level transaction rates, multi-transaction counts, time filtering.
+# *****************************************************
+ts("Building property-wide file with transaction history (wide)...")
 
-out_analytic <- paste0(data_output_s, "1-04_analytic.rds")
-saveRDS(analytic, file = out_analytic)
-cat(sprintf("  Saved -> %s\n", out_analytic))
-cat(sprintf("  Rows: %s  |  Columns: %d\n",
-            formatC(nrow(analytic), format = "d", big.mark = ","), ncol(analytic)))
+txn_cols <- c("sale_date", "sale_amt", "buy1_corp")
+
+# Ensure clip types match between analytic and prop before joining
+analytic$clip_id <- as.character(analytic$clip_id)
+prop$clip        <- as.character(prop$clip)
+
+analytic_ord <- analytic[order(analytic$clip_id, analytic$sale_date), ]
+analytic_ord$txn_num <- ave(seq_len(nrow(analytic_ord)), analytic_ord$clip_id, FUN = seq_along)
+
+txn_count_per_clip <- tapply(analytic_ord$txn_num, analytic_ord$clip_id, max)
+max_txn <- max(txn_count_per_clip)
+cat(sprintf("  Max transactions per property: %d\n", max_txn))
+
+# Flag extreme transaction counts — likely data artifacts
+high_txn_threshold <- 20L
+n_high_txn <- sum(txn_count_per_clip > high_txn_threshold)
+cat(sprintf("  Properties with > %d transactions: %s — review for data artifacts\n",
+            high_txn_threshold, formatC(n_high_txn, format = "d", big.mark = ",")))
+if (n_high_txn > 0) {
+  cat("  Sample high-txn CLIPs:\n")
+  print(head(sort(txn_count_per_clip[txn_count_per_clip > high_txn_threshold], decreasing = TRUE), 20))
+}
+
+cat("  Transaction count distribution:\n")
+print(table(txn_count_per_clip))
+
+# Hard drop CLIPs with > 7 transactions — once per year over 7 years is already
+# generous for a real SFR. Above this is almost certainly data artifacts
+# (CLIP reuse, parcel reassignment). 382 properties, 0.02% of unique CLIPs.
+txn_drop_threshold <- 7L
+clips_to_drop <- names(txn_count_per_clip)[txn_count_per_clip > txn_drop_threshold]
+n_clips_dropped <- length(clips_to_drop)
+n_rows_dropped  <- sum(analytic$clip_id %in% clips_to_drop)
+
+cat(sprintf("  Dropping CLIPs with > %d transactions: %s CLIPs, %s rows (%.3f%% of unique CLIPs)\n",
+            txn_drop_threshold,
+            formatC(n_clips_dropped, format = "d", big.mark = ","),
+            formatC(n_rows_dropped,  format = "d", big.mark = ","),
+            100 * n_clips_dropped / length(txn_count_per_clip)))
+
+drop_list <- c(drop_list, sprintf(
+  "dropped CLIPs with > %d transactions (data artifacts): %s CLIPs, %s rows (0.02%% of unique CLIPs)",
+  txn_drop_threshold,
+  formatC(n_clips_dropped, format = "d", big.mark = ","),
+  formatC(n_rows_dropped,  format = "d", big.mark = ",")
+))
+
+analytic     <- analytic[!analytic$clip_id %in% clips_to_drop, ]
+analytic_ord <- analytic_ord[!analytic_ord$clip_id %in% clips_to_drop, ]
+txn_count_per_clip <- txn_count_per_clip[!names(txn_count_per_clip) %in% clips_to_drop]
+
+cat(sprintf("  analytic after drop: %s rows\n", formatC(nrow(analytic), format = "d", big.mark = ",")))
+rm(clips_to_drop, n_clips_dropped, n_rows_dropped)
+
+prop_txn_wide <- reshape(
+  analytic_ord[, c("clip_id", "txn_num", txn_cols)],
+  idvar = "clip_id", timevar = "txn_num", direction = "wide", sep = "_transact"
+)
+old_nms <- names(prop_txn_wide)
+names(prop_txn_wide) <- sub("^(.+)_transact(\\d+)$", "transact\\2_\\1", old_nms)
+names(prop_txn_wide)[names(prop_txn_wide) == "clip_id"] <- "clip"
+
+prop_base <- prop[, c("clip", "lat", "lon")]
+prop_wide <- dplyr::left_join(prop_base, prop_txn_wide, by = "clip")
+
+# n_transact: look up from txn_count_per_clip using character clip as key
+prop_wide$n_transact <- as.integer(txn_count_per_clip[as.character(prop_wide$clip)])
+prop_wide$n_transact[is.na(prop_wide$n_transact)] <- 0L
+prop_wide$transacted <- as.integer(prop_wide$n_transact > 0L)
+
+cat(sprintf("  prop_wide: %s rows x %d columns\n",
+            formatC(nrow(prop_wide), format = "d", big.mark = ","), ncol(prop_wide)))
+cat(sprintf("  Transacted: %s  |  Not transacted: %s  |  Multi-txn: %s\n",
+            formatC(sum(prop_wide$transacted == 1L), format = "d", big.mark = ","),
+            formatC(sum(prop_wide$transacted == 0L), format = "d", big.mark = ","),
+            formatC(sum(prop_wide$n_transact  >  1L), format = "d", big.mark = ",")))
+
+drop_list <- c(drop_list, sprintf("prop_wide: max transactions per property (pre-cap): %d", max_txn))
+rm(analytic_ord, prop_txn_wide, prop_base, old_nms, max_txn, txn_cols, high_txn_threshold, n_high_txn, txn_drop_threshold)
 
 
 # *****************************************************
-# 9. Close out ----
+# 9. Save ----
+# *****************************************************
+ts("Saving outputs...")
+
+out_analytic  <- paste0(data_output_s, "1-04_analytic.rds")
+out_prop_wide <- paste0(data_output_s, "1-04_prop_wide.rds")
+out_unmatched <- paste0(data_output_s, "1-04_unmatched_clips.rds")
+
+saveRDS(analytic,  file = out_analytic);  cat(sprintf("  analytic  -> %s\n", out_analytic))
+saveRDS(prop_wide, file = out_prop_wide); cat(sprintf("  prop_wide -> %s\n", out_prop_wide))
+if (nrow(unmatched_df) > 0) {
+  saveRDS(unmatched_df, file = out_unmatched)
+  cat(sprintf("  unmatched -> %s\n", out_unmatched))
+}
+
+drop_list <- c(drop_list,
+               sprintf("1-04_analytic.rds:  %s rows x %d cols", formatC(nrow(analytic),  format = "d", big.mark = ","), ncol(analytic)),
+               sprintf("1-04_prop_wide.rds: %s rows x %d cols", formatC(nrow(prop_wide), format = "d", big.mark = ","), ncol(prop_wide)),
+               if (nrow(unmatched_df) > 0) sprintf("1-04_unmatched_clips.rds: %s rows — investigate in 999", formatC(nrow(unmatched_df), format = "d", big.mark = ","))
+)
+
+
+# *****************************************************
+# 10. Close out ----
 # *****************************************************
 cat("\n\nObjects saved:\n")
-cat(sprintf("  Analytic: %s\n", out_analytic))
+cat(sprintf("  analytic:  %s\n", out_analytic))
+cat(sprintf("  prop_wide: %s\n", out_prop_wide))
+if (nrow(unmatched_df) > 0) cat(sprintf("  unmatched: %s\n", out_unmatched))
 
 # drop list -> Dropbox (no PII, used for write-up)
 drop_list_file <- paste0(root, "Process/Logs/1-04_drop_list_", timestamp, ".txt")
@@ -371,11 +492,15 @@ invisible(lapply(drop_list, function(x) cat(sprintf("  %s\n", x))))
 
 cat("\n====================================================\n")
 cat("  Decisions needed after reviewing output:\n")
-cat("  1. Any unmatched OT rows? Expectation is zero — investigate if not.\n")
-cat("     Flag: prop_matched == 0; sample unmatched CLIPs printed above.\n")
+cat("  1. Any unmatched OT rows? Expectation is zero — investigate with 999 file if not.\n")
+cat("     Flag: prop_matched == 0; unmatched_df in environment + saved as 1-04_unmatched_clips.rds.\n")
 cat("  2. Review NA rates on key property columns among MATCHED rows (Section 6).\n")
 cat("     These are true missingness in the property file, not join failures.\n")
-cat("  3. Output: 1-04_analytic.rds\n")
+cat("  3. Review max transaction count per property — check for any data anomalies.\n")
+cat("  4. Outputs:\n")
+cat("       1-04_analytic.rds    — transacted properties (use for transaction-level analysis)\n")
+cat("       1-04_unmatched_clips.rds — OT rows with no property match (investigate)\n")
+cat("       1-04_prop_wide.rds   — all properties + wide txn history (use for block-level rates)\n")
 cat("====================================================\n")
 
 message("Total elapsed: ",
@@ -384,3 +509,5 @@ message("Total elapsed: ",
 beep()
 savehistory(paste0(secure, "Process/Fire Investment/Logs/1-04_history_", timestamp, ".txt"))
 sink()
+
+
