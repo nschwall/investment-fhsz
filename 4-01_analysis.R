@@ -128,4 +128,121 @@ exp(coef(output3))        # odds ratios
 
 
 
+library(lmtest)
+library(sandwich)
 
+# Scale continuous predictors
+analytic_model <- analytic_wui %>%
+  filter(!is.na(buy1_corp), !is.na(nonrenew_saleyr), !is.na(fair_saleyr),
+         !is.na(sale_amt), !is.na(sqft_living), !is.na(yr_built),
+         !is.na(acres), !is.na(median_hh_income), !is.na(pct_renter),
+         !is.na(pop_density), !is.na(wuitype_2020)) %>%
+  mutate(
+    nonrenew_sc    = scale(nonrenew_saleyr),
+    fair_sc        = scale(fair_saleyr),
+    log_sale_amt   = scale(log1p(sale_amt)),
+    log_sqft       = scale(log1p(sqft_living)),
+    yr_built_sc    = scale(yr_built),
+    acres_sc       = scale(acres),
+    hh_income_sc   = scale(median_hh_income),
+    pct_renter_sc  = scale(pct_renter),
+    pop_density_sc = scale(pop_density)
+  )
+
+cat(sprintf("  Model N: %s\n", formatC(nrow(analytic_model), format = "d", big.mark = ",")))
+
+# Fit model
+output3 <- glm(
+  buy1_corp ~ nonrenew_sc + fair_sc + wuitype_2020 +
+    log_sale_amt + log_sqft + yr_built_sc + acres_sc +
+    median_hh_income + pct_renter_sc + pop_density_sc +
+    factor(sale_yr),
+  data   = analytic_model,
+  family = binomial
+)
+
+# Clustered SEs by block group
+se_clustered <- coeftest(output3, vcov = vcovCL(output3, cluster = ~geoid))
+
+cat("\n--- Coefficients with block-group clustered SEs ---\n")
+print(se_clustered)
+
+cat("\n--- Odds ratios (clustered SEs) ---\n")
+or_df <- data.frame(
+  term     = rownames(se_clustered),
+  OR       = exp(se_clustered[, "Estimate"]),
+  CI_low   = exp(se_clustered[, "Estimate"] - 1.96 * se_clustered[, "Std. Error"]),
+  CI_high  = exp(se_clustered[, "Estimate"] + 1.96 * se_clustered[, "Std. Error"]),
+  p_value  = se_clustered[, "Pr(>|z|)"],
+  sig      = case_when(
+    se_clustered[, "Pr(>|z|)"] < 0.001 ~ "***",
+    se_clustered[, "Pr(>|z|)"] < 0.01  ~ "**",
+    se_clustered[, "Pr(>|z|)"] < 0.05  ~ "*",
+    TRUE                                ~ ""
+  )
+) %>%
+  mutate(across(c(OR, CI_low, CI_high), ~round(., 3)),
+         p_value = round(p_value, 4))
+
+print(or_df)
+
+readr::write_csv(or_df, paste0(img_out, "7-01_output3_logit_clustered.csv"))
+cat("  Saved: 7-01_output3_logit_clustered.csv\n")
+
+rm(analytic_model)
+
+
+analytic_model <- analytic_wui %>%
+  filter(!is.na(buy1_corp), !is.na(nonrenew_saleyr), !is.na(fair_saleyr),
+         !is.na(sale_amt), !is.na(sqft_living), !is.na(yr_built),
+         !is.na(acres), !is.na(median_hh_income), !is.na(pct_renter),
+         !is.na(pop_density), !is.na(wuiflag_2020)) %>%
+  mutate(
+    nonrenew_sc    = scale(nonrenew_saleyr),
+    fair_sc        = scale(fair_saleyr),
+    log_sale_amt   = scale(log1p(sale_amt)),
+    log_sqft       = scale(log1p(sqft_living)),
+    yr_built_sc    = scale(yr_built),
+    acres_sc       = scale(acres),
+    hh_income_sc   = scale(median_hh_income),
+    pct_renter_sc  = scale(pct_renter),
+    pop_density_sc = scale(pop_density),
+    wui_f          = factor(wuiflag_2020, levels = c(0, 1, 2),
+                            labels = c("Non-WUI", "Intermix", "Interface"))
+  )
+
+cat(sprintf("  Model N: %s\n", formatC(nrow(analytic_model), format = "d", big.mark = ",")))
+
+output4 <- glm(
+  buy1_corp ~ nonrenew_sc + fair_sc + wui_f +
+    log_sale_amt + log_sqft + yr_built_sc + acres_sc +
+    hh_income_sc + pct_renter_sc + pop_density_sc +
+    factor(sale_yr),
+  data   = analytic_model,
+  family = binomial
+)
+
+se_clustered <- coeftest(output4, vcov = vcovCL(output4, cluster = ~geoid))
+
+or_df <- data.frame(
+  term    = rownames(se_clustered),
+  OR      = exp(se_clustered[, "Estimate"]),
+  CI_low  = exp(se_clustered[, "Estimate"] - 1.96 * se_clustered[, "Std. Error"]),
+  CI_high = exp(se_clustered[, "Estimate"] + 1.96 * se_clustered[, "Std. Error"]),
+  p_value = se_clustered[, "Pr(>|z|)"],
+  sig     = case_when(
+    se_clustered[, "Pr(>|z|)"] < 0.001 ~ "***",
+    se_clustered[, "Pr(>|z|)"] < 0.01  ~ "**",
+    se_clustered[, "Pr(>|z|)"] < 0.05  ~ "*",
+    TRUE                                ~ ""
+  )
+) %>%
+  mutate(across(c(OR, CI_low, CI_high), ~round(., 3)),
+         p_value = round(p_value, 4))
+
+print(or_df)
+
+readr::write_csv(or_df, paste0(img_out, "7-01_output4_logit_wuiflag.csv"))
+cat("  Saved: 7-01_output4_logit_wuiflag.csv\n")
+
+rm(analytic_model)

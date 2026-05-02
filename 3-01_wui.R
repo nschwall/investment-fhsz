@@ -6,8 +6,8 @@
 # Purpose:   Load California WUI block-level change shapefile
 #            (1990-2020), clean and slim to relevant columns,
 #            reproject to CA Albers (EPSG:3310), and join to
-#            2-04_analytic.rds and 2-04_prop_wide.rds via
-#            point-in-polygon spatial join on property lat/lon.
+#            2-04_analytic.rds (analytic_ins) and 2-04_prop_wide.rds
+#            via point-in-polygon spatial join on property lat/lon.
 #
 #            Source: Radeloff et al. WUI change dataset
 #              CA_wui_block_1990_2020_change_v4
@@ -16,34 +16,39 @@
 #
 # ---- WUI COLUMNS KEPT ----
 #
-#   wuiclass_2020  -- WUICLASS_2: full WUI class string, 2020
-#   wuiflag_2020   -- WUIFLAG202: WUI flag (0=non-WUI, 1=intermix, 2=interface)
-#   vegpc_2019     -- VEG2019PC:  % vegetation cover, 2019
-#   wuiclass_2010  -- WUICLASS_1: full WUI class string, 2010
-#   wuiflag_2010   -- WUIFLAG201: WUI flag, 2010
-#   vegpc_2011     -- VEG2011PC:  % vegetation cover, 2011
-#   density_2020   -- extracted from wuiclass_2020 (High/Med/Low/VeryLow/Uninhabited/Water)
-#   density_2010   -- extracted from wuiclass_2010
+#   wuiclass_2020   -- WUICLASS_2: full WUI class string, 2020
+#   wuiflag_2020    -- WUIFLAG202: WUI flag (0=non-WUI, 1=intermix, 2=interface)
+#   vegpc_2019      -- VEG2019PC:  % vegetation cover, 2019
+#   wuiclass_2010   -- WUICLASS_1: full WUI class string, 2010
+#   wuiflag_2010    -- WUIFLAG201: WUI flag, 2010
+#   vegpc_2011      -- VEG2011PC:  % vegetation cover, 2011
+#   density_2020    -- extracted from wuiclass_2020 (High/Med/Low/VeryLow/Uninhabited/Water)
+#   density_2010    -- extracted from wuiclass_2010
+#   wuitype_2020    -- extracted from wuiclass_2020 (Interface/Intermix/NoVeg/Veg/Water)
+#   wuitype_2010    -- extracted from wuiclass_2010
 #   density_changed -- density_2020 != density_2010
 #   flag_changed    -- wuiflag_2020 != wuiflag_2010
+#   wuiflag_change  -- "More" / "Less" / "Same" (direction of flag change)
 #
 # ---- JOIN DESIGN ----
 #
-#   Property lat/lon (WGS84 EPSG:4326) converted to sf points,
-#   reprojected to CA Albers (EPSG:3310) to match WUI polygons,
-#   then st_join(st_within) to assign each property to a WUI block.
-#   Same approach as 1-05 block group join.
+#   Input: 2-04_analytic.rds = analytic_ins (transaction-level, includes
+#   insurance vars). Property lat/lon (WGS84 EPSG:4326) converted to sf
+#   points, reprojected to CA Albers (EPSG:3310) to match WUI polygons,
+#   then st_join(st_within). Each transaction row gets its own WUI block
+#   assignment based on property coordinates -- no row multiplication.
+#   stopifnot checks that insurance vars are present before proceeding.
 #
 # ---- INPUTS ----
 #
 #   Data/Source/WUI/.../CA_wui_block_1990_2020_change_v4.shp
-#   2-04_analytic.rds   (secure drive)
+#   2-04_analytic.rds   (secure drive) -- analytic_ins with insurance vars
 #   2-04_prop_wide.rds  (secure drive)
 #
 # ---- OUTPUTS ----
 #
 #   3-01_wui_3310.rds     -- cleaned WUI sf object, EPSG:3310
-#   3-01_analytic.rds     -- analytic + WUI vars
+#   3-01_analytic.rds     -- analytic_ins + WUI vars
 #   3-01_prop_wide.rds    -- prop_wide + WUI vars
 #
 # Author:    Nora Schwaller
@@ -78,7 +83,7 @@ cat("\n====================================================\n")
 cat("  3-01_wui.R  |  Started:", format(start_time), "\n")
 cat("====================================================\n\n")
 
-pkgs <- c("sf", "dplyr")
+pkgs <- c("sf", "dplyr", "lubridate", "ggplot2")
 invisible(lapply(pkgs, function(p) {
   if (!require(p, character.only = TRUE)) {
     install.packages(p); library(p, character.only = TRUE)
@@ -153,7 +158,7 @@ extract_density <- function(x) {
   dplyr::case_when(
     grepl("High_Dens",     x) ~ "High",
     grepl("Med_Dens",      x) ~ "Medium",
-    grepl("Very_Low_Dens", x) ~ "Very Low",   # must come before Low_Dens
+    grepl("Very_Low_Dens", x) ~ "Very Low",  # must come before Low_Dens
     grepl("Low_Dens",      x) ~ "Low",
     grepl("Uninhabited",   x) ~ "Uninhabited",
     grepl("Water",         x) ~ "Water",
@@ -165,7 +170,7 @@ extract_type <- function(x) {
   dplyr::case_when(
     grepl("Interface", x) ~ "Interface",
     grepl("Intermix",  x) ~ "Intermix",
-    grepl("NoVeg",     x) ~ "NoVeg",     # must come before Veg
+    grepl("NoVeg",     x) ~ "NoVeg",        # must come before Veg
     grepl("Veg",       x) ~ "Veg",
     grepl("Water",     x) ~ "Water",
     TRUE                  ~ NA_character_
@@ -188,13 +193,19 @@ wui <- wui_3310 %>%
     wuitype_2020    = extract_type(WUICLASS_2),
     wuitype_2010    = extract_type(WUICLASS_1),
     density_changed = density_2020 != density_2010,
-    flag_changed    = wuiflag_2020 != wuiflag_2010
+    flag_changed    = wuiflag_2020 != wuiflag_2010,
+    wuiflag_change  = dplyr::case_when(
+      is.na(wuiflag_2010) | is.na(wuiflag_2020) ~ NA_character_,
+      wuiflag_2020 > wuiflag_2010               ~ "More",
+      wuiflag_2020 < wuiflag_2010               ~ "Less",
+      TRUE                                      ~ "Same"
+    )
   ) %>%
   select(blk20, hu2020, hu2010,
          wuiclass_2020, wuiflag_2020, vegpc_2019,
          wuiclass_2010, wuiflag_2010, vegpc_2011,
          density_2020, density_2010, wuitype_2020, wuitype_2010,
-         density_changed, flag_changed)
+         density_changed, flag_changed, wuiflag_change)
 
 cat(sprintf("  WUI slim: %s rows x %d cols\n",
             formatC(nrow(wui), format = "d", big.mark = ","), ncol(wui)))
@@ -208,27 +219,31 @@ print(table(wui$density_changed, useNA = "ifany"))
 cat("\n--- WUI flag changed 2010->2020 ---\n")
 print(table(wui$flag_changed, useNA = "ifany"))
 
-rm(wui_3310)
+cat("\n--- WUI flag change direction ---\n")
+print(table(wui$wuiflag_change, useNA = "ifany"))
 
+# Flag transition matrix (block count)
+cat("\n--- Flag transition matrix (block count) ---\n")
+print(table(wui$wuiflag_2010, wui$wuiflag_2020,
+            dnn = c("flag_2010", "flag_2020")))
 
-# transition matrix - how many blocks changed flag
-table(wui$wuiflag_2010, wui$wuiflag_2020, dnn = c("flag_2010", "flag_2020"))
-
-# same but HU-weighted
-density_order <- c("Uninhabited" = 0, "Very Low" = 1, "Low" = 2, 
+# Density transition direction
+density_order <- c("Uninhabited" = 0, "Very Low" = 1, "Low" = 2,
                    "Medium" = 3, "High" = 4, "Water" = NA_real_)
 
+cat("\n--- Density and flag change direction (block counts) ---\n")
 wui %>%
   mutate(
     d2010 = density_order[density_2010],
     d2020 = density_order[density_2020],
-    density_direction = case_when(
-      is.na(d2010) | is.na(d2020) ~ "Unclassified",
-      d2020 > d2010               ~ "Increased",
-      d2020 < d2010               ~ "Decreased",
-      TRUE                        ~ "No change"
+    density_direction = dplyr::case_when(
+      density_2010 == "Water" | density_2020 == "Water" ~ "Water",
+      is.na(d2010) | is.na(d2020)                       ~ "Unclassified",
+      d2020 > d2010                                      ~ "Increased",
+      d2020 < d2010                                      ~ "Decreased",
+      TRUE                                               ~ "No change"
     ),
-    flag_direction = case_when(
+    flag_direction = dplyr::case_when(
       is.na(wuiflag_2010) | is.na(wuiflag_2020) ~ "Unclassified",
       wuiflag_2020 > wuiflag_2010                ~ "Increased",
       wuiflag_2020 < wuiflag_2010                ~ "Decreased",
@@ -238,13 +253,12 @@ wui %>%
   {list(
     density = table(.$density_direction),
     flag    = table(.$flag_direction)
-  )}
+  )} %>%
+  print()
 
-# density transitions
-table(wui$density_2010, wui$density_2020)
-
-with(wui, table(density_2020, density_2010, useNA = "always"))
-
+# Density transition matrix
+cat("\n--- Density transition matrix ---\n")
+print(table(wui$density_2010, wui$density_2020))
 
 
 # *****************************************************
@@ -261,29 +275,33 @@ cat(sprintf("  wui_3310 -> %s  (%s rows x %d cols)\n",
             ncol(wui)))
 
 
-# # *****************************************************
-# # 6. Load analytic and prop_wide ----
-# # *****************************************************
-# 
-# ts("Loading 2-04_analytic.rds and 2-04_prop_wide.rds...")
-# 
-# analytic  <- readRDS(paste0(data_output_s, "2-04_analytic.rds"))
-# prop_wide <- readRDS(paste0(data_output_s, "2-04_prop_wide.rds"))
-# 
-# cat(sprintf("  analytic:  %s rows x %d cols\n",
-#             formatC(nrow(analytic),  format = "d", big.mark = ","), ncol(analytic)))
-# cat(sprintf("  prop_wide: %s rows x %d cols\n",
-#             formatC(nrow(prop_wide), format = "d", big.mark = ","), ncol(prop_wide)))
-# 
-# stopifnot("lat" %in% names(analytic),  "lon" %in% names(analytic))
-# stopifnot("lat" %in% names(prop_wide), "lon" %in% names(prop_wide))
+# *****************************************************
+# 6. Load analytic_ins and prop_wide ----
+# *****************************************************
+# 2-04_analytic.rds is the output of 2-04 (analytic_ins) --
+# it contains all insurance variables. stopifnot verifies this
+# before proceeding so a stale file in memory doesn't silently
+# produce a joined output missing insurance vars.
+
+ts("Loading 2-04_analytic.rds (analytic_ins) and 2-04_prop_wide.rds...")
+
+analytic_ins <- readRDS(paste0(data_output_s, "2-04_analytic.rds"))
+prop_wide    <- readRDS(paste0(data_output_s, "2-04_prop_wide.rds"))
+
+cat(sprintf("  analytic_ins: %s rows x %d cols\n",
+            formatC(nrow(analytic_ins), format = "d", big.mark = ","), ncol(analytic_ins)))
+cat(sprintf("  prop_wide:    %s rows x %d cols\n",
+            formatC(nrow(prop_wide),    format = "d", big.mark = ","), ncol(prop_wide)))
+
+stopifnot("nonrenew_saleyr" %in% names(analytic_ins))  # insurance vars must be present
+stopifnot("lat" %in% names(analytic_ins), "lon" %in% names(analytic_ins))
+stopifnot("lat" %in% names(prop_wide),    "lon" %in% names(prop_wide))
+cat("  stopifnot checks passed: insurance vars present, lat/lon present.\n")
 
 
 # *****************************************************
 # 7. Helper: convert lat/lon to sf points in EPSG:3310 ----
 # *****************************************************
-# Property lat/lon are WGS84 (EPSG:4326), confirmed in 1-05.
-# Convert to CA Albers to match WUI polygons.
 
 make_points_3310 <- function(df) {
   df_valid <- df[!is.na(df$lat) & !is.na(df$lon), ]
@@ -294,29 +312,27 @@ make_points_3310 <- function(df) {
   sf::st_transform(pts, crs = 3310)
 }
 
-# Slim WUI to columns to attach -- drop geometry will be handled by st_join
 wui_cols <- c("blk20", "wuiclass_2020", "wuiflag_2020", "vegpc_2019",
               "wuiclass_2010", "wuiflag_2010", "vegpc_2011",
               "density_2020", "density_2010", "wuitype_2020", "wuitype_2010",
-              "density_changed", "flag_changed")
+              "density_changed", "flag_changed", "wuiflag_change")
 wui_slim <- wui[, c(wui_cols, "geometry")]
 
 
 # *****************************************************
-# 8. Spatial join: analytic ----
+# 8. Spatial join: analytic_ins ----
 # *****************************************************
 
-ts("Spatial join: analytic -> WUI blocks...")
+ts("Spatial join: analytic_ins -> WUI blocks...")
 
-analytic_pts  <- make_points_3310(analytic)
+analytic_pts  <- make_points_3310(analytic_ins)
 analytic_join <- sf::st_join(analytic_pts, wui_slim,
                              join = sf::st_within, left = TRUE)
 analytic_wui  <- sf::st_drop_geometry(analytic_join)
 
-n_total   <- nrow(analytic)
-n_valid   <- sum(!is.na(analytic$lat) & !is.na(analytic$lon))
+n_total   <- nrow(analytic_ins)
+n_valid   <- sum(!is.na(analytic_ins$lat) & !is.na(analytic_ins$lon))
 n_matched <- sum(!is.na(analytic_wui$blk20))
-n_no_ll   <- n_total - n_valid
 
 cat(sprintf("  Total rows:         %s\n", formatC(n_total,   format = "d", big.mark = ",")))
 cat(sprintf("  With lat/lon:       %s\n", formatC(n_valid,   format = "d", big.mark = ",")))
@@ -325,6 +341,14 @@ cat(sprintf("  Matched to WUI blk: %s (%.2f%% of valid lat/lon)\n",
             100 * n_matched / max(n_valid, 1)))
 cat(sprintf("  Unmatched (no blk): %s\n",
             formatC(n_valid - n_matched, format = "d", big.mark = ",")))
+
+# Verify row count preserved -- spatial join should not multiply rows
+stopifnot(nrow(analytic_wui) == nrow(analytic_ins))
+cat("  Row count preserved.\n")
+
+# Verify insurance vars still present after join
+stopifnot("nonrenew_saleyr" %in% names(analytic_wui))
+cat("  Insurance vars confirmed present in analytic_wui.\n")
 
 rm(analytic_pts, analytic_join)
 
@@ -352,34 +376,44 @@ cat(sprintf("  Matched to WUI blk: %s (%.2f%% of valid lat/lon)\n",
 cat(sprintf("  Unmatched (no blk): %s\n",
             formatC(n_valid_p - n_matched_p, format = "d", big.mark = ",")))
 
+stopifnot(nrow(prop_wui) == nrow(prop_wide))
+cat("  Row count preserved.\n")
+
 rm(prop_pts, prop_join)
 
 
 # *****************************************************
-# 10. Post-join distribution checks ----
+# 10. Post-join distribution checks and derived vars ----
 # *****************************************************
 
 ts("Post-join distribution checks...")
 
-cat("\n--- WUI class 2020 distribution (analytic) ---\n")
+# Derive sale_yr from sale_date
+analytic_wui <- analytic_wui %>%
+  mutate(sale_yr = lubridate::year(as.Date(sale_date)))
+
+cat("\n--- WUI class 2020 distribution (analytic_wui) ---\n")
 print(table(analytic_wui$wuiclass_2020, useNA = "ifany"))
 
-cat("\n--- Density 2020 distribution (analytic) ---\n")
+cat("\n--- Density 2020 distribution (analytic_wui) ---\n")
 print(table(analytic_wui$density_2020, useNA = "ifany"))
 
-cat("\n--- WUI flag 2020 distribution (analytic) ---\n")
+cat("\n--- WUI flag 2020 distribution (analytic_wui) ---\n")
 print(table(analytic_wui$wuiflag_2020, useNA = "ifany"))
 
-cat("\n--- Density changed 2010->2020 (analytic) ---\n")
+cat("\n--- WUI flag change direction (analytic_wui) ---\n")
+print(table(analytic_wui$wuiflag_change, useNA = "ifany"))
+
+cat("\n--- Density changed 2010->2020 (analytic_wui) ---\n")
 print(table(analytic_wui$density_changed, useNA = "ifany"))
+
+cat("\n--- Sale year distribution ---\n")
+print(table(analytic_wui$sale_yr))
 
 
 # *****************************************************
 # 11. Wilcoxon + Cohen's d by buy1_corp ----
 # *****************************************************
-# Compare WUI exposure between corporate and non-corporate buyers.
-# vegpc_2019 is continuous; wuiflag_2020 is ordinal (0/1/2).
-# Both suitable for Wilcoxon rank-sum.
 
 ts("Wilcoxon + Cohen's d: WUI vars by corporate buyer status...")
 
@@ -428,24 +462,22 @@ cat("  Significance: *** p<0.001  ** p<0.01  * p<0.05\n")
 cat("  Cohen's d on ranks: |d| ~0.2 small, ~0.5 medium, ~0.8 large\n")
 cat("  Note: N is large -- use Cohen's d for practical magnitude.\n")
 
-# WUI flag: cross-tab corporate vs non-corporate by flag category
 cat("\n--- WUI flag 2020: % corporate by flag category ---\n")
 analytic_wui %>%
   filter(!is.na(buy1_corp), !is.na(wuiflag_2020)) %>%
   group_by(wuiflag_2020) %>%
   summarise(
-    n          = n(),
-    pct_corp   = round(mean(buy1_corp == 1) * 100, 2),
-    .groups = "drop"
+    n        = n(),
+    pct_corp = round(mean(buy1_corp == 1) * 100, 2),
+    .groups  = "drop"
   ) %>%
-  mutate(flag_label = case_when(
+  mutate(flag_label = dplyr::case_when(
     wuiflag_2020 == 0 ~ "0 = Non-WUI",
     wuiflag_2020 == 1 ~ "1 = Intermix",
     wuiflag_2020 == 2 ~ "2 = Interface"
   )) %>%
   print()
 
-# Density: cross-tab corporate vs non-corporate by density category
 cat("\n--- Density 2020: % corporate by density category ---\n")
 analytic_wui %>%
   filter(!is.na(buy1_corp), !is.na(density_2020)) %>%
@@ -453,52 +485,65 @@ analytic_wui %>%
   summarise(
     n        = n(),
     pct_corp = round(mean(buy1_corp == 1) * 100, 2),
-    .groups = "drop"
+    .groups  = "drop"
   ) %>%
   arrange(desc(pct_corp)) %>%
   print()
 
+cat("\n--- WUI class 2020: % corporate ---\n")
+prop.table(table(analytic_wui$wuiclass_2020,
+                 analytic_wui$buy1_corp), margin = 1) * 100
+
 rm(corp_df, n_corp, n_noncorp)
 
-analytic_wui$sale_yr <- year(as.Date(analytic_wui$sale_date))
 
-analytic_wui %>%
-  filter(!is.na(buy1_corp), !is.na(wuiclass_2020)) %>%
-  group_by(sale_yr, wuiclass_2020) %>%
-  summarise(pct_corp = mean(buy1_corp == 1) * 100, n = n(), .groups = "drop") %>%
-  arrange(wuiclass_2020, sale_yr) %>%
-  print(n = 100)
+# *****************************************************
+# 12. Corporate share by WUI class over time (plots) ----
+# *****************************************************
 
+ts("Generating corporate share by WUI class plots...")
 
-analytic_wui %>%
-  filter(!is.na(buy1_corp), !is.na(wuiflag_2020)) %>%
-  group_by(sale_yr, wuiflag_2020) %>%
-  summarise(pct_corp = mean(buy1_corp == 1) * 100, n = n(), .groups = "drop") %>%
-  arrange(wuiflag_2020, sale_yr) %>%
-  print(n = 100)
-
-
-analytic_wui %>%
+plot_df <- analytic_wui %>%
   filter(!is.na(buy1_corp), !is.na(wuiclass_2020), sale_yr <= 2025,
          !wuiclass_2020 %in% c("Uninhabited_NoVeg", "Uninhabited_Veg", "Water")) %>%
   mutate(
-    density = case_when(
+    density = dplyr::case_when(
       grepl("High_Dens",     wuiclass_2020) ~ "High Density",
       grepl("Med_Dens",      wuiclass_2020) ~ "Medium Density",
       grepl("Very_Low_Dens", wuiclass_2020) ~ "Very Low Density",
       grepl("Low_Dens",      wuiclass_2020) ~ "Low Density"
     ),
-    wui_type = case_when(
+    wui_type = dplyr::case_when(
       grepl("Interface", wuiclass_2020) ~ "Interface",
       grepl("Intermix",  wuiclass_2020) ~ "Intermix",
       grepl("NoVeg",     wuiclass_2020) ~ "NoVeg",
       grepl("Veg",       wuiclass_2020) ~ "Veg"
     ),
     density = factor(density, levels = c("High Density", "Medium Density",
-                                         "Low Density", "Very Low Density"))
+                                         "Low Density",  "Very Low Density"))
   ) %>%
   group_by(sale_yr, density, wui_type) %>%
-  summarise(pct_corp = mean(buy1_corp == 1) * 100, n = n(), .groups = "drop") %>%
+  summarise(pct_corp = mean(buy1_corp == 1) * 100, n = n(), .groups = "drop")
+
+# Raw % corporate by WUI class and year
+p1 <- ggplot(plot_df, aes(x = sale_yr, y = pct_corp,
+                          color = wui_type, group = wui_type)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ density, ncol = 2) +
+  scale_x_continuous(breaks = 2019:2025) +
+  labs(title    = "Corporate buyer share by WUI class over time",
+       subtitle = "2026 excluded (partial year)",
+       x = NULL, y = "% corporate purchases", color = "WUI type") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom")
+
+ggsave(paste0(root, "Process/Images/3-01_corp_wui_class_year.png"),
+       plot = p1, width = 12, height = 8, dpi = 150)
+cat("  Plot saved: 3-01_corp_wui_class_year.png\n")
+
+# Indexed to 2019
+p2 <- plot_df %>%
   group_by(density, wui_type) %>%
   mutate(indexed = pct_corp / pct_corp[sale_yr == 2019] * 100) %>%
   ungroup() %>%
@@ -508,16 +553,21 @@ analytic_wui %>%
   geom_hline(yintercept = 100, linetype = "dashed", color = "grey50") +
   facet_wrap(~ density, ncol = 2) +
   scale_x_continuous(breaks = 2019:2025) +
-  labs(
-    title    = "Corporate buyer share indexed to 2019 by WUI class",
-    subtitle = "100 = 2019 baseline. Lines above 100 = grown faster than baseline.",
-    x = NULL, y = "Index (2019 = 100)", color = "WUI type"
-  ) +
+  labs(title    = "Corporate buyer share indexed to 2019 by WUI class",
+       subtitle = "100 = 2019 baseline. Lines above 100 = grown faster than baseline.",
+       x = NULL, y = "Index (2019 = 100)", color = "WUI type") +
   theme_minimal(base_size = 13) +
   theme(legend.position = "bottom")
 
+ggsave(paste0(root, "Process/Images/3-01_corp_wui_class_indexed.png"),
+       plot = p2, width = 12, height = 8, dpi = 150)
+cat("  Plot saved: 3-01_corp_wui_class_indexed.png\n")
+
+rm(plot_df, p1, p2)
+
+
 # *****************************************************
-# 12. Save ----
+# 13. Save ----
 # *****************************************************
 
 ts("Saving outputs...")
@@ -526,23 +576,23 @@ out_analytic  <- paste0(data_output_s, "3-01_analytic.rds")
 out_prop_wide <- paste0(data_output_s, "3-01_prop_wide.rds")
 
 saveRDS(analytic_wui, out_analytic)
-cat(sprintf("  (A) analytic  -> %s rows x %d cols\n",
+cat(sprintf("  (A) analytic_wui -> %s rows x %d cols\n",
             formatC(nrow(analytic_wui), format = "d", big.mark = ","),
             ncol(analytic_wui)))
 
 saveRDS(prop_wui, out_prop_wide)
-cat(sprintf("  (B) prop_wide -> %s rows x %d cols\n",
+cat(sprintf("  (B) prop_wui     -> %s rows x %d cols\n",
             formatC(nrow(prop_wui), format = "d", big.mark = ","),
             ncol(prop_wui)))
 
 
 # *****************************************************
-# 13. Close out ----
+# 14. Close out ----
 # *****************************************************
 
 cat("\n\n")
 cat(strrep("=", 70), "\n")
-cat("  WUI variables added:\n")
+cat("  WUI variables added to analytic_ins and prop_wide:\n")
 cat("    blk20           -- census block GEOID (15-char)\n")
 cat("    wuiclass_2020   -- full WUI class string, 2020\n")
 cat("    wuiflag_2020    -- WUI flag (0=non-WUI, 1=intermix, 2=interface)\n")
@@ -556,10 +606,12 @@ cat("    wuitype_2020    -- type extracted from wuiclass_2020\n")
 cat("    wuitype_2010    -- type extracted from wuiclass_2010\n")
 cat("    density_changed -- density_2020 != density_2010\n")
 cat("    flag_changed    -- wuiflag_2020 != wuiflag_2010\n")
+cat("    wuiflag_change  -- More / Less / Same\n")
+cat("    sale_yr         -- year(sale_date)\n")
 cat("\n  Outputs:\n")
-cat(sprintf("    3-01_wui_3310.rds  -- cleaned WUI sf, EPSG:3310\n"))
-cat(sprintf("    3-01_analytic.rds  -- analytic + WUI vars\n"))
-cat(sprintf("    3-01_prop_wide.rds -- prop_wide + WUI vars\n"))
+cat("    3-01_wui_3310.rds  -- cleaned WUI sf, EPSG:3310\n")
+cat("    3-01_analytic.rds  -- analytic_ins + WUI vars\n")
+cat("    3-01_prop_wide.rds -- prop_wide + WUI vars\n")
 cat(strrep("=", 70), "\n")
 
 message("Total elapsed: ",
@@ -567,5 +619,6 @@ message("Total elapsed: ",
 
 savehistory(paste0(secure, "Process/Fire Investment/Logs/3-01_history_", timestamp, ".txt"))
 sink()
+
 
 
